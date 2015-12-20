@@ -2250,7 +2250,27 @@ class Project(object):
   def _InitRemote(self):
     if self.remote.url:
       remote = self.GetRemote(self.remote.name)
-      remote.url = self.remote.url
+
+      if 'mokee' == self.manifest.default.remote.name:
+        aosp = 'https://android.googlesource.com'
+        tuna = 'https://aosp.tuna.tsinghua.edu.cn'
+        caf = 'git://codeaurora.org/quic/la'
+
+        if aosp in self.remote.url:
+          if 'MK_AOSP_REMOTE' in os.environ:
+            if os.environ['MK_AOSP_REMOTE'] == 'tuna':
+              remote.url = self.remote.url.replace(aosp, tuna)
+            elif os.environ['MK_AOSP_REMOTE'] == 'caf':
+              remote.url = self.remote.url.replace(aosp, caf)
+            else:
+              remote.url = self.remote.url
+          else:
+            remote.url = self.remote.url.replace(aosp, caf)
+        else:
+          remote.url = self.remote.url
+      else:
+        remote.url = self.remote.url
+
       remote.review = self.remote.review
       remote.projectname = self.name
 
