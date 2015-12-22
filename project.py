@@ -2253,8 +2253,9 @@ class Project(object):
 
       if 'mokee' == self.manifest.default.remote.name:
         aosp = 'https://android.googlesource.com'
-        tuna = 'https://aosp.tuna.tsinghua.edu.cn'
+        tuna = 'git://aosp.tuna.tsinghua.edu.cn/aosp'
         caf = 'git://codeaurora.org/quic/la'
+        ustc = 'git://mirrors.ustc.edu.cn/aosp'
 
         if aosp in self.remote.url:
           if 'MK_AOSP_REMOTE' in os.environ:
@@ -2262,6 +2263,8 @@ class Project(object):
               remote.url = self.remote.url.replace(aosp, tuna)
             elif os.environ['MK_AOSP_REMOTE'] == 'caf':
               remote.url = self.remote.url.replace(aosp, caf)
+            elif os.environ['MK_AOSP_REMOTE'] == 'ustc':
+              remote.url = self.remote.url.replace(aosp, ustc)
             else:
               remote.url = self.remote.url
           else:
