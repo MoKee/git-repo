@@ -2351,7 +2351,7 @@ class Project(object):
 
       if 'mokee' == self.manifest.default.remote.name:
         aosp = 'https://android.googlesource.com'
-        tuna = 'git://aosp.tuna.tsinghua.edu.cn/aosp'
+        tuna = 'https://aosp.tuna.tsinghua.edu.cn'
         caf = 'git://codeaurora.org/quic/la'
         ustc = 'git://mirrors.ustc.edu.cn/aosp'
 
