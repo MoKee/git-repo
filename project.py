@@ -320,11 +320,13 @@ class RemoteSpec(object):
   def __init__(self,
                name,
                url=None,
+               pushUrl=None,
                review=None,
                revision=None,
                orig_name=None):
     self.name = name
     self.url = url
+    self.pushUrl = pushUrl
     self.review = review
     self.revision = revision
     self.orig_name = orig_name
@@ -1825,6 +1827,7 @@ class Project(object):
 
       remote = RemoteSpec(self.remote.name,
                           url=url,
+                          pushUrl=self.remote.pushUrl,
                           review=self.remote.review,
                           revision=self.remote.revision)
       subproject = Project(manifest=self.manifest,
@@ -1834,7 +1837,7 @@ class Project(object):
                            objdir=objdir,
                            worktree=worktree,
                            relpath=relpath,
-                           revisionExpr=self.revisionExpr,
+                           revisionExpr=rev,
                            revisionId=rev,
                            rebase=self.rebase,
                            groups=self.groups,
@@ -2368,7 +2371,7 @@ class Project(object):
           remote.url = self.remote.url
       else:
         remote.url = self.remote.url
-
+      remote.pushUrl = self.remote.pushUrl
       remote.review = self.remote.review
       remote.projectname = self.name
 
