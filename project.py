@@ -2354,6 +2354,7 @@ class Project(object):
         tuna = 'https://aosp.tuna.tsinghua.edu.cn'
         caf = 'git://codeaurora.org/quic/la'
         ustc = 'git://mirrors.ustc.edu.cn/aosp'
+        mokee = 'https://review.mfunz.com/aosp'
 
         if aosp in self.remote.url:
           if 'MK_AOSP_REMOTE' in os.environ:
@@ -2363,6 +2364,8 @@ class Project(object):
               remote.url = self.remote.url.replace(aosp, caf)
             elif os.environ['MK_AOSP_REMOTE'] == 'ustc':
               remote.url = self.remote.url.replace(aosp, ustc)
+            elif os.environ['MK_AOSP_REMOTE'] == 'mokee':
+              remote.url = self.remote.url.replace(aosp, mokee)
             else:
               remote.url = self.remote.url
           else:
