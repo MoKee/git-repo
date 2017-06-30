@@ -40,8 +40,18 @@ LOCAL_MANIFEST_NAME = 'local_manifest.xml'
 LOCAL_MANIFESTS_DIR_NAME = 'local_manifests'
 
 # urljoin gets confused if the scheme is not known.
-urllib.parse.uses_relative.extend(['ssh', 'git', 'persistent-https', 'rpc'])
-urllib.parse.uses_netloc.extend(['ssh', 'git', 'persistent-https', 'rpc'])
+urllib.parse.uses_relative.extend([
+    'ssh',
+    'git',
+    'persistent-https',
+    'sso',
+    'rpc'])
+urllib.parse.uses_netloc.extend([
+    'ssh',
+    'git',
+    'persistent-https',
+    'sso',
+    'rpc'])
 
 class _Default(object):
   """Project defaults within the manifest."""
@@ -100,7 +110,8 @@ class _XmlRemote(object):
     return url
 
   def ToRemoteSpec(self, projectName):
-    url = self.resolvedFetchUrl.rstrip('/') + '/' + projectName
+    fetchUrl = self.resolvedFetchUrl.rstrip('/')
+    url = fetchUrl + '/' + projectName
     remoteName = self.name
     if self.remoteAlias:
       remoteName = self.remoteAlias
@@ -108,7 +119,8 @@ class _XmlRemote(object):
                       url=url,
                       pushUrl=self.pushUrl,
                       review=self.reviewUrl,
-                      orig_name=self.name)
+                      orig_name=self.name,
+                      fetchUrl=self.fetchUrl)
 
 class XmlManifest(object):
   """manages the repo configuration file"""
@@ -154,7 +166,7 @@ class XmlManifest(object):
     try:
       if os.path.lexists(self.manifestFile):
         os.remove(self.manifestFile)
-      os.symlink('manifests/%s' % name, self.manifestFile)
+      os.symlink(os.path.join('manifests', name), self.manifestFile)
     except OSError as e:
       raise ManifestParseError('cannot link manifest %s: %s' % (name, str(e)))
 
@@ -382,6 +394,10 @@ class XmlManifest(object):
   @property
   def IsArchive(self):
     return self.manifestProject.config.GetBoolean('repo.archive')
+
+  @property
+  def HasSubmodules(self):
+    return self.manifestProject.config.GetBoolean('repo.submodules')
 
   def _Unload(self):
     self._loaded = False
