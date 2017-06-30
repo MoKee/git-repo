@@ -46,7 +46,7 @@ class Progress(object):
         return
 
     if self._total <= 0:
-      sys.stderr.write('\r%s: %d, ' % (
+      sys.stderr.write('\r\033[1;33m%s: %d, \033[0;0m' % (
         self._title,
         self._done))
       sys.stderr.flush()
@@ -55,7 +55,7 @@ class Progress(object):
 
       if self._lastp != p or self._always_print_percentage:
         self._lastp = p
-        sys.stderr.write('\r%s: %3d%% (%d%s/%d%s)%s' % (
+        sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s)%s\033[0;0m' % (
           self._title,
           p,
           self._done, self._units,
@@ -68,13 +68,13 @@ class Progress(object):
       return
 
     if self._total <= 0:
-      sys.stderr.write('\r%s: %d, done.  \n' % (
+      sys.stderr.write('\r\033[1;33m%s: %d, done.  \033[0;0m\n' % (
         self._title,
         self._done))
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
-      sys.stderr.write('\r%s: %3d%% (%d%s/%d%s), done.  \n' % (
+      sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s), done.  \033[0;0m\n' % (
         self._title,
         p,
         self._done, self._units,
