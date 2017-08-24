@@ -21,7 +21,8 @@ from trace import IsTrace
 _NOT_TTY = not os.isatty(2)
 
 class Progress(object):
-  def __init__(self, title, total=0, units='', print_newline=False):
+  def __init__(self, title, total=0, units='', print_newline=False,
+               always_print_percentage=False):
     self._title = title
     self._total = total
     self._done = 0
@@ -30,6 +31,7 @@ class Progress(object):
     self._show = False
     self._units = units
     self._print_newline = print_newline
+    self._always_print_percentage = always_print_percentage
 
   def update(self, inc=1):
     self._done += inc
@@ -51,9 +53,9 @@ class Progress(object):
     else:
       p = (100 * self._done) / self._total
 
-      if self._lastp != p:
+      if self._lastp != p or self._always_print_percentage:
         self._lastp = p
-        sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s)%s \033[0;0m' % (
+        sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s)%s\033[0;0m' % (
           self._title,
           p,
           self._done, self._units,

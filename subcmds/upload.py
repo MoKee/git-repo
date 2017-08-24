@@ -154,6 +154,12 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
     p.add_option('-d', '--draft',
                  action='store_true', dest='draft', default=False,
                  help='If specified, upload as a draft.')
+    p.add_option('-p', '--private',
+                 action='store_true', dest='private', default=False,
+                 help='If specified, upload as a private change.')
+    p.add_option('-w', '--wip',
+                 action='store_true', dest='wip', default=False,
+                 help='If specified, upload as a work-in-progress change.')
     p.add_option('-D', '--destination', '--dest',
                  type='string', action='store', dest='dest_branch',
                  metavar='BRANCH',
@@ -198,7 +204,8 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
       commit_list = branch.commits
 
       destination = opt.dest_branch or project.dest_branch or project.revisionExpr
-      print('Upload project %s/ to remote branch %s:' % (project.relpath, destination))
+      print('Upload project %s/ to remote branch %s%s:' %
+            (project.relpath, destination, ' (draft)' if opt.draft else ''))
       print('  branch %s (%2d commit%s, %s):' % (
                     name,
                     len(commit_list),
@@ -377,7 +384,12 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
             branch.uploaded = False
             continue
 
-        branch.UploadForReview(people, auto_topic=opt.auto_topic, draft=opt.draft, dest_branch=destination)
+        branch.UploadForReview(people,
+                               auto_topic=opt.auto_topic,
+                               draft=opt.draft,
+                               private=opt.private,
+                               wip=opt.wip,
+                               dest_branch=destination)
         branch.uploaded = True
       except UploadError as e:
         branch.error = e
@@ -463,8 +475,8 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
                       self.manifest.topdir,
                       self.manifest.manifestProject.GetRemote('origin').url,
                       abort_if_user_denies=True)
-      pending_proj_names = [project.name for (project, avail) in pending]
-      pending_worktrees = [project.worktree for (project, avail) in pending]
+      pending_proj_names = [project.name for (project, available) in pending]
+      pending_worktrees = [project.worktree for (project, available) in pending]
       try:
         hook.Run(opt.allow_all_hooks, project_list=pending_proj_names,
                  worktree_list=pending_worktrees)

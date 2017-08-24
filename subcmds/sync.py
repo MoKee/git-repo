@@ -357,7 +357,8 @@ later is required to fix a server side protocol bug.
     fetched = set()
     lock = _threading.Lock()
     pm = Progress('Fetching projects', len(projects),
-                  print_newline=not(opt.quiet))
+                  print_newline=not(opt.quiet),
+                  always_print_percentage=opt.quiet)
 
     objdir_project_map = dict()
     for project in projects:
@@ -780,8 +781,8 @@ later is required to fix a server side protocol bug.
       # generate a new args list to represent the opened projects.
       # TODO: make this more reliable -- if there's a project name/path overlap,
       # this may choose the wrong project.
-      args = [os.path.relpath(self.manifest.paths[p].worktree, os.getcwd())
-              for p in opened_projects]
+      args = [os.path.relpath(self.manifest.paths[path].worktree, os.getcwd())
+              for path in opened_projects]
       if not args:
         return
     all_projects = self.GetProjects(args,
