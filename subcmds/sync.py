@@ -19,7 +19,6 @@ import netrc
 from optparse import SUPPRESS_HELP
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -73,6 +72,7 @@ from project import Project
 from project import RemoteSpec
 from command import Command, MirrorSafeCommand
 from error import RepoChangedException, GitError, ManifestParseError
+import platform_utils
 from project import SyncBuffer
 from progress import Progress
 from wrapper import Wrapper
@@ -475,7 +475,7 @@ later is required to fix a server side protocol bug.
     # working git repository around. There shouldn't be any git projects here,
     # so rmtree works.
     try:
-      shutil.rmtree(os.path.join(path, '.git'))
+      platform_utils.rmtree(os.path.join(path, '.git'))
     except OSError:
       print('Failed to remove %s' % os.path.join(path, '.git'), file=sys.stderr)
       print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
@@ -489,7 +489,7 @@ later is required to fix a server side protocol bug.
     for root, dirs, files in os.walk(path):
       for f in files:
         try:
-          os.remove(os.path.join(root, f))
+          platform_utils.remove(os.path.join(root, f))
         except OSError:
           print('Failed to remove %s' % os.path.join(root, f), file=sys.stderr)
           failed = True
@@ -498,9 +498,9 @@ later is required to fix a server side protocol bug.
       dirs_to_remove += [os.path.join(root, d) for d in dirs
                          if os.path.join(root, d) not in dirs_to_remove]
     for d in reversed(dirs_to_remove):
-      if os.path.islink(d):
+      if platform_utils.islink(d):
         try:
-          os.remove(d)
+          platform_utils.remove(d)
         except OSError:
           print('Failed to remove %s' % os.path.join(root, d), file=sys.stderr)
           failed = True
@@ -712,7 +712,7 @@ later is required to fix a server side protocol bug.
     else:  # Not smart sync or smart tag mode
       if os.path.isfile(smart_sync_manifest_path):
         try:
-          os.remove(smart_sync_manifest_path)
+          platform_utils.remove(smart_sync_manifest_path)
         except OSError as e:
           print('error: failed to remove existing smart sync override manifest: %s' %
                 e, file=sys.stderr)
@@ -956,7 +956,7 @@ class _FetchTimes(object):
           f.close()
       except (IOError, ValueError):
         try:
-          os.remove(self._path)
+          platform_utils.remove(self._path)
         except OSError:
           pass
         self._times = {}
@@ -980,7 +980,7 @@ class _FetchTimes(object):
         f.close()
     except (IOError, TypeError):
       try:
-        os.remove(self._path)
+        platform_utils.remove(self._path)
       except OSError:
         pass
 

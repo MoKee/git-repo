@@ -20,6 +20,7 @@ import errno
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 try:
@@ -41,6 +42,7 @@ else:
 
 from signal import SIGTERM
 from error import GitError, UploadError
+import platform_utils
 from trace import Trace
 if is_python3():
   from http.client import HTTPException
@@ -50,15 +52,23 @@ else:
 from git_command import GitCommand
 from git_command import ssh_sock
 from git_command import terminate_ssh_clients
+from git_refs import R_CHANGES, R_HEADS, R_TAGS
 
-R_HEADS = 'refs/heads/'
-R_TAGS  = 'refs/tags/'
 ID_RE = re.compile(r'^[0-9a-f]{40}$')
 
 REVIEW_CACHE = dict()
 
+def IsChange(rev):
+  return rev.startswith(R_CHANGES)
+
 def IsId(rev):
   return ID_RE.match(rev)
+
+def IsTag(rev):
+  return rev.startswith(R_TAGS)
+
+def IsImmutable(rev):
+    return IsChange(rev) or IsId(rev) or IsTag(rev)
 
 def _key(name):
   parts = name.split('.')
@@ -259,7 +269,7 @@ class GitConfig(object):
     try:
       if os.path.getmtime(self._json) \
       <= os.path.getmtime(self.file):
-        os.remove(self._json)
+        platform_utils.remove(self._json)
         return None
     except OSError:
       return None
@@ -271,7 +281,7 @@ class GitConfig(object):
       finally:
         fd.close()
     except (IOError, ValueError):
-      os.remove(self._json)
+      platform_utils.remove(self._json)
       return None
 
   def _SaveJson(self, cache):
@@ -283,7 +293,7 @@ class GitConfig(object):
         fd.close()
     except (IOError, TypeError):
       if os.path.exists(self._json):
-        os.remove(self._json)
+        platform_utils.remove(self._json)
 
   def _ReadGit(self):
     """
@@ -604,7 +614,7 @@ class Remote(object):
     connectionUrl = self._InsteadOf()
     return _preconnect(connectionUrl)
 
-  def ReviewUrl(self, userEmail):
+  def ReviewUrl(self, userEmail, validate_certs):
     if self._review_url is None:
       if self.review is None:
         return None
@@ -612,7 +622,7 @@ class Remote(object):
       u = self.review
       if u.startswith('persistent-'):
         u = u[len('persistent-'):]
-      if u.split(':')[0] not in ('http', 'https', 'sso'):
+      if u.split(':')[0] not in ('http', 'https', 'sso', 'ssh'):
         u = 'http://%s' % u
       if u.endswith('/Gerrit'):
         u = u[:len(u) - len('/Gerrit')]
@@ -628,7 +638,7 @@ class Remote(object):
         host, port = os.environ['REPO_HOST_PORT_INFO'].split()
         self._review_url = self._SshReviewUrl(userEmail, host, port)
         REVIEW_CACHE[u] = self._review_url
-      elif u.startswith('sso:'):
+      elif u.startswith('sso:') or u.startswith('ssh:'):
         self._review_url = u  # Assume it's right
         REVIEW_CACHE[u] = self._review_url
       elif 'REPO_IGNORE_SSH_INFO' in os.environ:
@@ -637,7 +647,11 @@ class Remote(object):
       else:
         try:
           info_url = u + 'ssh_info'
-          info = urllib.request.urlopen(info_url).read()
+          if not validate_certs:
+              context = ssl._create_unverified_context()
+              info = urllib.request.urlopen(info_url, context=context).read()
+          else:
+              info = urllib.request.urlopen(info_url).read()
           if info == 'NOT_AVAILABLE' or '<' in info:
             # If `info` contains '<', we assume the server gave us some sort
             # of HTML response back, like maybe a login page.

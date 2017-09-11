@@ -16,11 +16,12 @@
 import os
 from trace import Trace
 
-HEAD    = 'HEAD'
-R_HEADS = 'refs/heads/'
-R_TAGS  = 'refs/tags/'
-R_PUB   = 'refs/published/'
-R_M     = 'refs/remotes/m/'
+HEAD      = 'HEAD'
+R_CHANGES = 'refs/changes/'
+R_HEADS   = 'refs/heads/'
+R_TAGS    = 'refs/tags/'
+R_PUB     = 'refs/published/'
+R_M       = 'refs/remotes/m/'
 
 
 class GitRefs(object):
@@ -138,7 +139,7 @@ class GitRefs(object):
 
   def _ReadLoose1(self, path, name):
     try:
-      fd = open(path, 'rb')
+      fd = open(path)
     except IOError:
       return
 
