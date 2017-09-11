@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 
 from error import EditorError
+import platform_utils
 
 class Editor(object):
   """Manages the user's preferred text editor."""
@@ -82,7 +83,12 @@ least one of these before using this command.""", file=sys.stderr)
       os.close(fd)
       fd = None
 
-      if re.compile("^.*[$ \t'].*$").match(editor):
+      if platform_utils.isWindows():
+        # Split on spaces, respecting quoted strings
+        import shlex
+        args = shlex.split(editor)
+        shell = False
+      elif re.compile("^.*[$ \t'].*$").match(editor):
         args = [editor + ' "$@"', 'sh']
         shell = True
       else:
@@ -107,4 +113,4 @@ least one of these before using this command.""", file=sys.stderr)
     finally:
       if fd:
         os.close(fd)
-      os.remove(path)
+      platform_utils.remove(path)
