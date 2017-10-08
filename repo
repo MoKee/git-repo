@@ -23,7 +23,7 @@ REPO_REV = 'stable'
 # limitations under the License.
 
 # increment this whenever we make important changes to this script
-VERSION = (1, 41)
+VERSION = (1, 42)
 
 # increment this if the MAINTAINER_KEYS block is modified
 KEYRING_VERSION = (1, 3)

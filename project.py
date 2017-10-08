@@ -2354,7 +2354,7 @@ class Project(object):
         tuna = 'https://aosp.tuna.tsinghua.edu.cn'
         caf = 'git://codeaurora.org/quic/la'
         ustc = 'git://mirrors.ustc.edu.cn/aosp'
-        mokee = 'https://review.mfunz.com/aosp'
+        mokee = 'https://mokeedev.review/aosp'
 
         if aosp in self.remote.url:
           if 'MK_AOSP_REMOTE' in os.environ:
