@@ -19,7 +19,6 @@ import netrc
 from optparse import SUPPRESS_HELP
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -64,6 +63,7 @@ try:
 except ImportError:
   multiprocessing = None
 
+import event_log
 from git_command import GIT, git_require
 from git_config import GetUrlCookieFile
 from git_refs import R_HEADS, HEAD
@@ -72,6 +72,7 @@ from project import Project
 from project import RemoteSpec
 from command import Command, MirrorSafeCommand
 from error import RepoChangedException, GitError, ManifestParseError
+import platform_utils
 from project import SyncBuffer
 from progress import Progress
 from wrapper import Wrapper
@@ -154,8 +155,7 @@ exist locally.
 The --prune option can be used to remove any refs that no longer
 exist on the remote.
 
-SSH Connections
----------------
+# SSH Connections
 
 If at least one project remote URL uses an SSH connection (ssh://,
 git+ssh://, or user@host:path syntax) repo will automatically
@@ -169,8 +169,7 @@ environment variable to 'ssh'.  For example:
   export GIT_SSH=ssh
   %prog
 
-Compatibility
-~~~~~~~~~~~~~
+# Compatibility
 
 This feature is automatically disabled on Windows, due to the lack
 of UNIX domain socket support.
@@ -255,7 +254,7 @@ later is required to fix a server side protocol bug.
                  dest='repo_upgraded', action='store_true',
                  help=SUPPRESS_HELP)
 
-  def _FetchProjectList(self, opt, projects, *args, **kwargs):
+  def _FetchProjectList(self, opt, projects, sem, *args, **kwargs):
     """Main function of the fetch threads when jobs are > 1.
 
     Delegates most of the work to _FetchHelper.
@@ -263,15 +262,20 @@ later is required to fix a server side protocol bug.
     Args:
       opt: Program options returned from optparse.  See _Options().
       projects: Projects to fetch.
+      sem: We'll release() this semaphore when we exit so that another thread
+          can be started up.
       *args, **kwargs: Remaining arguments to pass to _FetchHelper. See the
           _FetchHelper docstring for details.
     """
-    for project in projects:
-      success = self._FetchHelper(opt, project, *args, **kwargs)
-      if not success and not opt.force_broken:
-        break
+    try:
+        for project in projects:
+          success = self._FetchHelper(opt, project, *args, **kwargs)
+          if not success and not opt.force_broken:
+            break
+    finally:
+        sem.release()
 
-  def _FetchHelper(self, opt, project, lock, fetched, pm, sem, err_event):
+  def _FetchHelper(self, opt, project, lock, fetched, pm, err_event):
     """Fetch git objects for a single project.
 
     Args:
@@ -283,8 +287,6 @@ later is required to fix a server side protocol bug.
           (with our lock held).
       pm: Instance of a Project object.  We will call pm.update() (with our
           lock held).
-      sem: We'll release() this semaphore when we exit so that another thread
-          can be started up.
       err_event: We'll set this event in the case of an error (after printing
           out info about the error).
 
@@ -301,9 +303,10 @@ later is required to fix a server side protocol bug.
     # - We always set err_event in the case of an exception.
     # - We always make sure we call sem.release().
     # - We always make sure we unlock the lock if we locked it.
+    start = time.time()
+    success = False
     try:
       try:
-        start = time.time()
         success = project.Sync_NetworkHalf(
           quiet=opt.quiet,
           current_branch_only=opt.current_branch_only,
@@ -321,7 +324,9 @@ later is required to fix a server side protocol bug.
 
         if not success:
           err_event.set()
-          print('error: Cannot fetch %s' % project.name, file=sys.stderr)
+          print('error: Cannot fetch %s from %s'
+                % (project.name, project.remote.url),
+                file=sys.stderr)
           if opt.force_broken:
             print('warn: --force-broken, continuing to sync',
                   file=sys.stderr)
@@ -340,14 +345,18 @@ later is required to fix a server side protocol bug.
     finally:
       if did_lock:
         lock.release()
-      sem.release()
+      finish = time.time()
+      self.event_log.AddSync(project, event_log.TASK_SYNC_NETWORK,
+                             start, finish, success)
 
     return success
 
   def _Fetch(self, projects, opt):
     fetched = set()
     lock = _threading.Lock()
-    pm = Progress('Fetching projects', len(projects))
+    pm = Progress('Fetching projects', len(projects),
+                  print_newline=not(opt.quiet),
+                  always_print_percentage=opt.quiet)
 
     objdir_project_map = dict()
     for project in projects:
@@ -365,10 +374,10 @@ later is required to fix a server side protocol bug.
       sem.acquire()
       kwargs = dict(opt=opt,
                     projects=project_list,
+                    sem=sem,
                     lock=lock,
                     fetched=fetched,
                     pm=pm,
-                    sem=sem,
                     err_event=err_event)
       if self.jobs > 1:
         t = _threading.Thread(target = self._FetchProjectList,
@@ -384,7 +393,7 @@ later is required to fix a server side protocol bug.
       t.join()
 
     # If we saw an error, exit with code 1 so that other scripts can check.
-    if err_event.isSet():
+    if err_event.isSet() and not opt.force_broken:
       print('\nerror: Exited sync due to fetch errors', file=sys.stderr)
       sys.exit(1)
 
@@ -464,9 +473,9 @@ later is required to fix a server side protocol bug.
     # working git repository around. There shouldn't be any git projects here,
     # so rmtree works.
     try:
-      shutil.rmtree(os.path.join(path, '.git'))
-    except OSError:
-      print('Failed to remove %s' % os.path.join(path, '.git'), file=sys.stderr)
+      platform_utils.rmtree(os.path.join(path, '.git'))
+    except OSError as e:
+      print('Failed to remove %s (%s)' % (os.path.join(path, '.git'), str(e)), file=sys.stderr)
       print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
       print('       remove manually, then run sync again', file=sys.stderr)
       return -1
@@ -475,29 +484,29 @@ later is required to fix a server side protocol bug.
     # another git project
     dirs_to_remove = []
     failed = False
-    for root, dirs, files in os.walk(path):
+    for root, dirs, files in platform_utils.walk(path):
       for f in files:
         try:
-          os.remove(os.path.join(root, f))
-        except OSError:
-          print('Failed to remove %s' % os.path.join(root, f), file=sys.stderr)
+          platform_utils.remove(os.path.join(root, f))
+        except OSError as e:
+          print('Failed to remove %s (%s)' % (os.path.join(root, f), str(e)), file=sys.stderr)
           failed = True
       dirs[:] = [d for d in dirs
                  if not os.path.lexists(os.path.join(root, d, '.git'))]
       dirs_to_remove += [os.path.join(root, d) for d in dirs
                          if os.path.join(root, d) not in dirs_to_remove]
     for d in reversed(dirs_to_remove):
-      if os.path.islink(d):
+      if platform_utils.islink(d):
         try:
-          os.remove(d)
-        except OSError:
-          print('Failed to remove %s' % os.path.join(root, d), file=sys.stderr)
+          platform_utils.remove(d)
+        except OSError as e:
+          print('Failed to remove %s (%s)' % (os.path.join(root, d), str(e)), file=sys.stderr)
           failed = True
-      elif len(os.listdir(d)) == 0:
+      elif len(platform_utils.listdir(d)) == 0:
         try:
-          os.rmdir(d)
-        except OSError:
-          print('Failed to remove %s' % os.path.join(root, d), file=sys.stderr)
+          platform_utils.rmdir(d)
+        except OSError as e:
+          print('Failed to remove %s (%s)' % (os.path.join(root, d), str(e)), file=sys.stderr)
           failed = True
           continue
     if failed:
@@ -508,8 +517,8 @@ later is required to fix a server side protocol bug.
     # Try deleting parent dirs if they are empty
     project_dir = path
     while project_dir != self.manifest.topdir:
-      if len(os.listdir(project_dir)) == 0:
-        os.rmdir(project_dir)
+      if len(platform_utils.listdir(project_dir)) == 0:
+        platform_utils.rmdir(project_dir)
       else:
         break
       project_dir = os.path.dirname(project_dir)
@@ -701,7 +710,7 @@ later is required to fix a server side protocol bug.
     else:  # Not smart sync or smart tag mode
       if os.path.isfile(smart_sync_manifest_path):
         try:
-          os.remove(smart_sync_manifest_path)
+          platform_utils.remove(smart_sync_manifest_path)
         except OSError as e:
           print('error: failed to remove existing smart sync override manifest: %s' %
                 e, file=sys.stderr)
@@ -716,15 +725,24 @@ later is required to fix a server side protocol bug.
       _PostRepoUpgrade(self.manifest, quiet=opt.quiet)
 
     if not opt.local_only:
-      mp.Sync_NetworkHalf(quiet=opt.quiet,
-                          current_branch_only=opt.current_branch_only,
-                          no_tags=opt.no_tags,
-                          optimized_fetch=opt.optimized_fetch)
+      start = time.time()
+      success = mp.Sync_NetworkHalf(quiet=opt.quiet,
+                                    current_branch_only=opt.current_branch_only,
+                                    no_tags=opt.no_tags,
+                                    optimized_fetch=opt.optimized_fetch,
+                                    submodules=self.manifest.HasSubmodules)
+      finish = time.time()
+      self.event_log.AddSync(mp, event_log.TASK_SYNC_NETWORK,
+                             start, finish, success)
 
     if mp.HasChanges:
       syncbuf = SyncBuffer(mp.config)
-      mp.Sync_LocalHalf(syncbuf)
-      if not syncbuf.Finish():
+      start = time.time()
+      mp.Sync_LocalHalf(syncbuf, submodules=self.manifest.HasSubmodules)
+      clean = syncbuf.Finish()
+      self.event_log.AddSync(mp, event_log.TASK_SYNC_LOCAL,
+                             start, time.time(), clean)
+      if not clean:
         sys.exit(1)
       self._ReloadManifest(manifest_name)
       if opt.jobs is None:
@@ -761,8 +779,8 @@ later is required to fix a server side protocol bug.
       # generate a new args list to represent the opened projects.
       # TODO: make this more reliable -- if there's a project name/path overlap,
       # this may choose the wrong project.
-      args = [os.path.relpath(self.manifest.paths[p].worktree, os.getcwd())
-              for p in opened_projects]
+      args = [os.path.relpath(self.manifest.paths[path].worktree, os.getcwd())
+              for path in opened_projects]
       if not args:
         return
     all_projects = self.GetProjects(args,
@@ -818,7 +836,10 @@ later is required to fix a server side protocol bug.
     for project in all_projects:
       pm.update()
       if project.worktree:
+        start = time.time()
         project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
+        self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
+                               start, time.time(), syncbuf.Recently())
     pm.end()
     print(file=sys.stderr)
     if not syncbuf.Finish():
@@ -902,6 +923,7 @@ def _VerifyTag(project):
     return False
   return True
 
+
 class _FetchTimes(object):
   _ALPHA = 0.5
 
@@ -932,7 +954,7 @@ class _FetchTimes(object):
           f.close()
       except (IOError, ValueError):
         try:
-          os.remove(self._path)
+          platform_utils.remove(self._path)
         except OSError:
           pass
         self._times = {}
@@ -956,7 +978,7 @@ class _FetchTimes(object):
         f.close()
     except (IOError, TypeError):
       try:
-        os.remove(self._path)
+        platform_utils.remove(self._path)
       except OSError:
         pass
 

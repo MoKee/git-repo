@@ -17,7 +17,6 @@ from __future__ import print_function
 import os
 import platform
 import re
-import shutil
 import sys
 
 from pyversion import is_python3
@@ -35,6 +34,7 @@ from error import ManifestParseError
 from project import SyncBuffer
 from git_config import GitConfig
 from git_command import git_require, MIN_GIT_VERSION
+import platform_utils
 
 class Init(InteractiveCommand, MirrorSafeCommand):
   common = True
@@ -61,14 +61,18 @@ directory use as much data as possible from the local reference
 directory when fetching from the server. This will make the sync
 go a lot faster by reducing data traffic on the network.
 
+The --dissociate option can be used to borrow the objects from
+the directory specified with the --reference option only to reduce
+network transfer, and stop borrowing from them after a first clone
+is made by making necessary local copies of borrowed objects.
+
 The --no-clone-bundle option disables any attempt to use
 $URL/clone.bundle to bootstrap a new Git repository from a
 resumeable bundle file on a content delivery network. This
 may be necessary if there are problems with the local Python
 HTTP client or proxy configuration, but the Git binary works.
 
-Switching Manifest Branches
----------------------------
+# Switching Manifest Branches
 
 To switch to another manifest branch, `repo init -b otherbranch`
 may be used in an existing client.  However, as this only updates the
@@ -91,6 +95,9 @@ to update the working directory files.
     g.add_option('-b', '--manifest-branch',
                  dest='manifest_branch',
                  help='manifest branch or revision', metavar='REVISION')
+    g.add_option('-c', '--current-branch',
+                 dest='current_branch_only', action='store_true',
+                 help='fetch only current manifest branch from server')
     g.add_option('-m', '--manifest-name',
                  dest='manifest_name', default='default.xml',
                  help='initial manifest file', metavar='NAME.xml')
@@ -101,6 +108,9 @@ to update the working directory files.
     g.add_option('--reference',
                  dest='reference',
                  help='location of mirror directory', metavar='DIR')
+    g.add_option('--dissociate',
+                 dest='dissociate', action='store_true',
+                 help='dissociate from reference mirrors after clone')
     g.add_option('--depth', type='int', default=None,
                  dest='depth',
                  help='create a shallow clone with given depth; see git clone')
@@ -108,6 +118,9 @@ to update the working directory files.
                  dest='archive', action='store_true',
                  help='checkout an archive instead of a git repository for '
                       'each project. See git archive.')
+    g.add_option('--submodules',
+                 dest='submodules', action='store_true',
+                 help='sync any submodules associated with the manifest repo')
     g.add_option('-g', '--groups',
                  dest='groups', default='default',
                  help='restrict manifest projects to ones with specified '
@@ -121,6 +134,9 @@ to update the working directory files.
     g.add_option('--no-clone-bundle',
                  dest='no_clone_bundle', action='store_true',
                  help='disable use of /clone.bundle on HTTP/HTTPS')
+    g.add_option('--no-tags',
+                 dest='no_tags', action='store_true',
+                 help="don't fetch tags in the manifest")
 
     # Tool
     g = p.add_option_group('repo Version options')
@@ -166,7 +182,8 @@ to update the working directory files.
         if not mirrored_manifest_git.endswith(".git"):
           mirrored_manifest_git += ".git"
         if not os.path.exists(mirrored_manifest_git):
-          mirrored_manifest_git = os.path.join(opt.reference + '/.repo/manifests.git')
+          mirrored_manifest_git = os.path.join(opt.reference,
+                                               '.repo/manifests.git')
 
       m._InitGitDir(mirror_git=mirrored_manifest_git)
 
@@ -210,6 +227,9 @@ to update the working directory files.
     if opt.reference:
       m.config.SetString('repo.reference', opt.reference)
 
+    if opt.dissociate:
+      m.config.SetString('repo.dissociate', 'true')
+
     if opt.archive:
       if is_new:
         m.config.SetString('repo.archive', 'true')
@@ -230,22 +250,27 @@ to update the working directory files.
               'in another location.', file=sys.stderr)
         sys.exit(1)
 
+    if opt.submodules:
+      m.config.SetString('repo.submodules', 'true')
+
     if not m.Sync_NetworkHalf(is_new=is_new, quiet=opt.quiet,
-        clone_bundle=not opt.no_clone_bundle):
+        clone_bundle=not opt.no_clone_bundle,
+        current_branch_only=opt.current_branch_only,
+        no_tags=opt.no_tags, submodules=opt.submodules):
       r = m.GetRemote(m.remote.name)
       print('fatal: cannot obtain manifest %s' % r.url, file=sys.stderr)
 
       # Better delete the manifest git dir if we created it; otherwise next
       # time (when user fixes problems) we won't go through the "is_new" logic.
       if is_new:
-        shutil.rmtree(m.gitdir)
+        platform_utils.rmtree(m.gitdir)
       sys.exit(1)
 
     if opt.manifest_branch:
-      m.MetaBranchSwitch()
+      m.MetaBranchSwitch(submodules=opt.submodules)
 
     syncbuf = SyncBuffer(m.config)
-    m.Sync_LocalHalf(syncbuf)
+    m.Sync_LocalHalf(syncbuf, submodules=opt.submodules)
     syncbuf.Finish()
 
     if is_new or m.CurrentBranch is None:

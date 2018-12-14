@@ -14,18 +14,14 @@
 # limitations under the License.
 
 from __future__ import print_function
-import os
-import shutil
 import sys
 
 from command import Command, GitcClientCommand
-import gitc_utils
+import platform_utils
 
 from pyversion import is_python3
 if not is_python3():
-  # pylint:disable=W0622
   input = raw_input
-  # pylint:enable=W0622
 
 class GitcDelete(Command, GitcClientCommand):
   common = True
@@ -52,4 +48,4 @@ and all locally downloaded sources.
       if not response == 'yes':
         print('Response was not "yes"\n Exiting...')
         sys.exit(1)
-    shutil.rmtree(self.gitc_manifest.gitc_client_dir)
+    platform_utils.rmtree(self.gitc_manifest.gitc_client_dir)

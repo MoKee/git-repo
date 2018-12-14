@@ -25,12 +25,10 @@ from git_command import GitCommand
 from project import RepoHook
 
 from pyversion import is_python3
-# pylint:disable=W0622
 if not is_python3():
   input = raw_input
 else:
   unicode = str
-# pylint:enable=W0622
 
 UNUSUAL_COMMIT_THRESHOLD = 5
 
@@ -80,8 +78,7 @@ added to the respective list of users, and emails are sent to any
 new users.  Users passed as --reviewers must already be registered
 with the code review system, or the upload will fail.
 
-Configuration
--------------
+# Configuration
 
 review.URL.autoupload:
 
@@ -128,10 +125,9 @@ is set to "true" then repo will assume you always want the equivalent
 of the -t option to the repo command. If unset or set to "false" then
 repo will make use of only the command line option.
 
-References
-----------
+# References
 
-Gerrit Code Review:  http://code.google.com/p/gerrit/
+Gerrit Code Review:  https://www.gerritcodereview.com/
 
 """
 
@@ -154,6 +150,19 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
     p.add_option('-d', '--draft',
                  action='store_true', dest='draft', default=False,
                  help='If specified, upload as a draft.')
+    p.add_option('--ne', '--no-emails',
+                 action='store_false', dest='notify', default=True,
+                 help='If specified, do not send emails on upload.')
+    p.add_option('-p', '--private',
+                 action='store_true', dest='private', default=False,
+                 help='If specified, upload as a private change.')
+    p.add_option('-w', '--wip',
+                 action='store_true', dest='wip', default=False,
+                 help='If specified, upload as a work-in-progress change.')
+    p.add_option('-o', '--push-option',
+                 type='string', action='append', dest='push_options',
+                 default=[],
+                 help='Additional push options to transmit')
     p.add_option('-D', '--destination', '--dest',
                  type='string', action='store', dest='dest_branch',
                  metavar='BRANCH',
@@ -175,6 +184,9 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
     #   Never run upload hooks, but upload anyway (AKA bypass hooks).
     # - no-verify=True, verify=True:
     #   Invalid
+    p.add_option('--no-cert-checks',
+                 dest='validate_certs', action='store_false', default=True,
+                 help='Disable verifying ssl certs (unsafe).')
     p.add_option('--no-verify',
                  dest='bypass_hooks', action='store_true',
                  help='Do not run the upload hook.')
@@ -198,7 +210,8 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
       commit_list = branch.commits
 
       destination = opt.dest_branch or project.dest_branch or project.revisionExpr
-      print('Upload project %s/ to remote branch %s:' % (project.relpath, destination))
+      print('Upload project %s/ to remote branch %s%s:' %
+            (project.relpath, destination, ' (draft)' if opt.draft else ''))
       print('  branch %s (%2d commit%s, %s):' % (
                     name,
                     len(commit_list),
@@ -377,7 +390,16 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
             branch.uploaded = False
             continue
 
-        branch.UploadForReview(people, auto_topic=opt.auto_topic, draft=opt.draft, dest_branch=destination)
+        branch.UploadForReview(people,
+                               auto_topic=opt.auto_topic,
+                               draft=opt.draft,
+                               private=opt.private,
+                               notify=None if opt.notify else 'NONE',
+                               wip=opt.wip,
+                               dest_branch=destination,
+                               validate_certs=opt.validate_certs,
+                               push_options=opt.push_options)
+
         branch.uploaded = True
       except UploadError as e:
         branch.error = e
@@ -463,8 +485,8 @@ Gerrit Code Review:  http://code.google.com/p/gerrit/
                       self.manifest.topdir,
                       self.manifest.manifestProject.GetRemote('origin').url,
                       abort_if_user_denies=True)
-      pending_proj_names = [project.name for (project, avail) in pending]
-      pending_worktrees = [project.worktree for (project, avail) in pending]
+      pending_proj_names = [project.name for (project, available) in pending]
+      pending_worktrees = [project.worktree for (project, available) in pending]
       try:
         hook.Run(opt.allow_all_hooks, project_list=pending_proj_names,
                  worktree_list=pending_worktrees)

@@ -32,6 +32,7 @@ else:
 import gitc_utils
 from git_config import GitConfig
 from git_refs import R_HEADS, HEAD
+import platform_utils
 from project import RemoteSpec, Project, MetaProject
 from error import ManifestParseError, ManifestInvalidRevisionError
 
@@ -40,18 +41,30 @@ LOCAL_MANIFEST_NAME = 'local_manifest.xml'
 LOCAL_MANIFESTS_DIR_NAME = 'local_manifests'
 
 # urljoin gets confused if the scheme is not known.
-urllib.parse.uses_relative.extend(['ssh', 'git', 'persistent-https', 'rpc'])
-urllib.parse.uses_netloc.extend(['ssh', 'git', 'persistent-https', 'rpc'])
+urllib.parse.uses_relative.extend([
+    'ssh',
+    'git',
+    'persistent-https',
+    'sso',
+    'rpc'])
+urllib.parse.uses_netloc.extend([
+    'ssh',
+    'git',
+    'persistent-https',
+    'sso',
+    'rpc'])
 
 class _Default(object):
   """Project defaults within the manifest."""
 
   revisionExpr = None
   destBranchExpr = None
+  upstreamExpr = None
   remote = None
   sync_j = 1
   sync_c = False
   sync_s = False
+  sync_tags = True
 
   def __eq__(self, other):
     return self.__dict__ == other.__dict__
@@ -100,7 +113,8 @@ class _XmlRemote(object):
     return url
 
   def ToRemoteSpec(self, projectName):
-    url = self.resolvedFetchUrl.rstrip('/') + '/' + projectName
+    fetchUrl = self.resolvedFetchUrl.rstrip('/')
+    url = fetchUrl + '/' + projectName
     remoteName = self.name
     if self.remoteAlias:
       remoteName = self.remoteAlias
@@ -108,7 +122,8 @@ class _XmlRemote(object):
                       url=url,
                       pushUrl=self.pushUrl,
                       review=self.reviewUrl,
-                      orig_name=self.name)
+                      orig_name=self.name,
+                      fetchUrl=self.fetchUrl)
 
 class XmlManifest(object):
   """manages the repo configuration file"""
@@ -153,8 +168,8 @@ class XmlManifest(object):
 
     try:
       if os.path.lexists(self.manifestFile):
-        os.remove(self.manifestFile)
-      os.symlink('manifests/%s' % name, self.manifestFile)
+        platform_utils.remove(self.manifestFile)
+      platform_utils.symlink(os.path.join('manifests', name), self.manifestFile)
     except OSError as e:
       raise ManifestParseError('cannot link manifest %s: %s' % (name, str(e)))
 
@@ -216,6 +231,9 @@ class XmlManifest(object):
     if d.destBranchExpr:
       have_default = True
       e.setAttribute('dest-branch', d.destBranchExpr)
+    if d.upstreamExpr:
+      have_default = True
+      e.setAttribute('upstream', d.upstreamExpr)
     if d.sync_j > 1:
       have_default = True
       e.setAttribute('sync-j', '%d' % d.sync_j)
@@ -225,6 +243,9 @@ class XmlManifest(object):
     if d.sync_s:
       have_default = True
       e.setAttribute('sync-s', 'true')
+    if not d.sync_tags:
+      have_default = True
+      e.setAttribute('sync-tags', 'false')
     if have_default:
       root.appendChild(e)
       root.appendChild(doc.createTextNode(''))
@@ -278,7 +299,8 @@ class XmlManifest(object):
         revision = self.remotes[p.remote.orig_name].revision or d.revisionExpr
         if not revision or revision != p.revisionExpr:
           e.setAttribute('revision', p.revisionExpr)
-        if p.upstream and p.upstream != p.revisionExpr:
+        if (p.upstream and (p.upstream != p.revisionExpr or
+                            p.upstream != d.upstreamExpr)):
           e.setAttribute('upstream', p.upstream)
 
       if p.dest_branch and p.dest_branch != d.destBranchExpr:
@@ -313,6 +335,9 @@ class XmlManifest(object):
 
       if p.sync_s:
         e.setAttribute('sync-s', 'true')
+
+      if not p.sync_tags:
+        e.setAttribute('sync-tags', 'false')
 
       if p.clone_depth:
         e.setAttribute('clone-depth', str(p.clone_depth))
@@ -383,6 +408,10 @@ class XmlManifest(object):
   def IsArchive(self):
     return self.manifestProject.config.GetBoolean('repo.archive')
 
+  @property
+  def HasSubmodules(self):
+    return self.manifestProject.config.GetBoolean('repo.submodules')
+
   def _Unload(self):
     self._loaded = False
     self._projects = {}
@@ -417,7 +446,7 @@ class XmlManifest(object):
 
       local_dir = os.path.abspath(os.path.join(self.repodir, LOCAL_MANIFESTS_DIR_NAME))
       try:
-        for local_file in sorted(os.listdir(local_dir)):
+        for local_file in sorted(platform_utils.listdir(local_dir)):
           if local_file.endswith('.xml'):
             local = os.path.join(local_dir, local_file)
             nodes.append(self._ParseManifestXml(local, self.repodir))
@@ -454,8 +483,7 @@ class XmlManifest(object):
       raise ManifestParseError("no <manifest> in %s" % (path,))
 
     nodes = []
-    for node in manifest.childNodes:  # pylint:disable=W0631
-                                      # We only get here if manifest is initialised
+    for node in manifest.childNodes:
       if node.nodeName == 'include':
         name = self._reqatt(node, 'name')
         fp = os.path.join(include_root, name)
@@ -547,12 +575,15 @@ class XmlManifest(object):
         groups = node.getAttribute('groups')
         if groups:
           groups = self._ParseGroups(groups)
+        revision = node.getAttribute('revision')
 
         for p in self._projects[name]:
           if path and p.relpath != path:
             continue
           if groups:
             p.groups.extend(groups)
+          if revision:
+            p.revisionExpr = revision
       if node.nodeName == 'repo-hooks':
         # Get the name of the project and the (space-separated) list of enabled.
         repo_hooks_project = self._reqatt(node, 'in-project')
@@ -667,6 +698,7 @@ class XmlManifest(object):
       d.revisionExpr = None
 
     d.destBranchExpr = node.getAttribute('dest-branch') or None
+    d.upstreamExpr = node.getAttribute('upstream') or None
 
     sync_j = node.getAttribute('sync-j')
     if sync_j == '' or sync_j is None:
@@ -685,6 +717,12 @@ class XmlManifest(object):
       d.sync_s = False
     else:
       d.sync_s = sync_s.lower() in ("yes", "true", "1")
+
+    sync_tags = node.getAttribute('sync-tags')
+    if not sync_tags:
+      d.sync_tags = True
+    else:
+      d.sync_tags = sync_tags.lower() in ("yes", "true", "1")
     return d
 
   def _ParseNotice(self, node):
@@ -779,6 +817,12 @@ class XmlManifest(object):
     else:
       sync_s = sync_s.lower() in ("yes", "true", "1")
 
+    sync_tags = node.getAttribute('sync-tags')
+    if not sync_tags:
+      sync_tags = self._default.sync_tags
+    else:
+      sync_tags = sync_tags.lower() in ("yes", "true", "1")
+
     clone_depth = node.getAttribute('clone-depth')
     if clone_depth:
       try:
@@ -791,7 +835,7 @@ class XmlManifest(object):
 
     dest_branch = node.getAttribute('dest-branch') or self._default.destBranchExpr
 
-    upstream = node.getAttribute('upstream')
+    upstream = node.getAttribute('upstream') or self._default.upstreamExpr
 
     groups = ''
     if node.hasAttribute('groups'):
@@ -824,6 +868,7 @@ class XmlManifest(object):
                       groups = groups,
                       sync_c = sync_c,
                       sync_s = sync_s,
+                      sync_tags = sync_tags,
                       clone_depth = clone_depth,
                       upstream = upstream,
                       parent = parent,

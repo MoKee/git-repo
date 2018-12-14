@@ -15,17 +15,16 @@
 
 from __future__ import print_function
 import errno
-import fcntl
 import multiprocessing
 import re
 import os
-import select
 import signal
 import sys
 import subprocess
 
 from color import Coloring
 from command import Command, MirrorSafeCommand
+import platform_utils
 
 _CAN_COLOR = [
   'branch',
@@ -54,8 +53,7 @@ Executes the same shell command in each project.
 The -r option allows running the command only on projects matching
 regex or wildcard expression.
 
-Output Formatting
------------------
+# Output Formatting
 
 The -p option causes '%prog' to bind pipes to the command's stdin,
 stdout and stderr streams, and pipe all output into a continuous
@@ -72,8 +70,7 @@ command produces output only on stderr.  Normally the -p option
 causes command output to be suppressed until the command produces
 at least one byte of output on stdout.
 
-Environment
------------
+# Environment
 
 pwd is the project's working directory.  If the current client is
 a mirror client, then pwd is the Git repository.
@@ -104,6 +101,13 @@ annotating tree details.
 
 shell positional arguments ($1, $2, .., $#) are set to any arguments
 following <command>.
+
+Example: to list projects:
+
+  %prog% forall -c 'echo $REPO_PROJECT'
+
+Notice that $REPO_PROJECT is quoted to ensure it is expanded in
+the context of running <command> instead of in the calling shell.
 
 Unless -p is used, stdin, stdout, stderr are inherited from the
 terminal and are not redirected.
@@ -199,14 +203,12 @@ without iterating through the remaining projects.
           break
       else:
         cn = None
-      # pylint: disable=W0631
       if cn and cn in _CAN_COLOR:
         class ColorCmd(Coloring):
           def __init__(self, config, cmd):
             Coloring.__init__(self, config, cmd)
         if ColorCmd(self.manifest.manifestProject.config, cn).is_on:
           cmd.insert(cmd.index(cn) + 1, '--color')
-      # pylint: enable=W0631
 
     mirror = self.manifest.IsMirror
     rc = 0
@@ -344,35 +346,25 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
   if opt.project_header:
     out = ForallColoring(config)
     out.redirect(sys.stdout)
-    class sfd(object):
-      def __init__(self, fd, dest):
-        self.fd = fd
-        self.dest = dest
-      def fileno(self):
-        return self.fd.fileno()
-
     empty = True
     errbuf = ''
 
     p.stdin.close()
-    s_in = [sfd(p.stdout, sys.stdout),
-            sfd(p.stderr, sys.stderr)]
+    s_in = platform_utils.FileDescriptorStreams.create()
+    s_in.add(p.stdout, sys.stdout, 'stdout')
+    s_in.add(p.stderr, sys.stderr, 'stderr')
 
-    for s in s_in:
-      flags = fcntl.fcntl(s.fd, fcntl.F_GETFL)
-      fcntl.fcntl(s.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-    while s_in:
-      in_ready, _out_ready, _err_ready = select.select(s_in, [], [])
+    while not s_in.is_done:
+      in_ready = s_in.select()
       for s in in_ready:
-        buf = s.fd.read(4096)
+        buf = s.read()
         if not buf:
-          s.fd.close()
+          s.close()
           s_in.remove(s)
           continue
 
         if not opt.verbose:
-          if s.fd != p.stdout:
+          if s.std_name == 'stderr':
             errbuf += buf
             continue
 

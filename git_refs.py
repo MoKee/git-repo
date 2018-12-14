@@ -15,12 +15,14 @@
 
 import os
 from trace import Trace
+import platform_utils
 
-HEAD    = 'HEAD'
-R_HEADS = 'refs/heads/'
-R_TAGS  = 'refs/tags/'
-R_PUB   = 'refs/published/'
-R_M     = 'refs/remotes/m/'
+HEAD      = 'HEAD'
+R_CHANGES = 'refs/changes/'
+R_HEADS   = 'refs/heads/'
+R_TAGS    = 'refs/tags/'
+R_PUB     = 'refs/published/'
+R_M       = 'refs/remotes/m/'
 
 
 class GitRefs(object):
@@ -126,9 +128,9 @@ class GitRefs(object):
 
   def _ReadLoose(self, prefix):
     base = os.path.join(self._gitdir, prefix)
-    for name in os.listdir(base):
+    for name in platform_utils.listdir(base):
       p = os.path.join(base, name)
-      if os.path.isdir(p):
+      if platform_utils.isdir(p):
         self._mtime[prefix] = os.path.getmtime(base)
         self._ReadLoose(prefix + name + '/')
       elif name.endswith('.lock'):
@@ -138,7 +140,7 @@ class GitRefs(object):
 
   def _ReadLoose1(self, path, name):
     try:
-      fd = open(path, 'rb')
+      fd = open(path)
     except IOError:
       return
 
