@@ -55,7 +55,7 @@ class Progress(object):
 
       if self._lastp != p or self._always_print_percentage:
         self._lastp = p
-        sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s)%s  \033[0;0m' % (
+        sys.stderr.write('\r\033[1;33m%s: %3d%% (%d%s/%d%s)%s\033[0;0m' % (
           self._title,
           p,
           self._done, self._units,

@@ -2464,7 +2464,7 @@ class Project(object):
             else:
               remote.url = self.remote.url
           else:
-            remote.url = self.remote.url.replace(aosp, caf)
+            remote.url = self.remote.url.replace(aosp, tuna)
         else:
           remote.url = self.remote.url
       else:
