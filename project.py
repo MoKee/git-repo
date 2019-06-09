@@ -1172,10 +1172,11 @@ class Project(object):
 
     ref_spec = '%s:refs/%s/%s' % (R_HEADS + branch.name, upload_type,
                                   dest_branch)
+    opts = []
     if auto_topic:
-      ref_spec = ref_spec + '/' + branch.name
+      opts += ['topic=' + branch.name]
 
-    opts = ['r=%s' % p for p in people[0]]
+    opts += ['r=%s' % p for p in people[0]]
     opts += ['cc=%s' % p for p in people[1]]
     if notify:
       opts += ['notify=' + notify]
@@ -1306,7 +1307,7 @@ class Project(object):
         not self._RemoteFetch(initial=is_new, quiet=quiet, alt_dir=alt_dir,
                               current_branch_only=current_branch_only,
                               no_tags=no_tags, prune=prune, depth=depth,
-                              submodules=submodules)):
+                              submodules=submodules, force_sync=force_sync)):
       return False
 
     mp = self.manifest.manifestProject
@@ -1807,8 +1808,8 @@ class Project(object):
         submodules.append((sub_rev, sub_path, sub_url))
       return submodules
 
-    re_path = re.compile(r'^submodule\.([^.]+)\.path=(.*)$')
-    re_url = re.compile(r'^submodule\.([^.]+)\.url=(.*)$')
+    re_path = re.compile(r'^submodule\.(.+)\.path=(.*)$')
+    re_url = re.compile(r'^submodule\.(.+)\.url=(.*)$')
 
     def parse_gitmodules(gitdir, rev):
       cmd = ['cat-file', 'blob', '%s:.gitmodules' % rev]
@@ -1955,7 +1956,8 @@ class Project(object):
                    no_tags=False,
                    prune=False,
                    depth=None,
-                   submodules=False):
+                   submodules=False,
+                   force_sync=False):
 
     is_sha1 = False
     tag_name = None
@@ -1979,8 +1981,9 @@ class Project(object):
 
       if is_sha1 or tag_name is not None:
         if self._CheckForImmutableRevision():
-          print('Skipped fetching project %s (already have persistent ref)'
-                % self.name)
+          if not quiet:
+            print('Skipped fetching project %s (already have persistent ref)'
+                  % self.name)
           return True
       if is_sha1 and not depth:
         # When syncing a specific commit and --depth is not set:
@@ -2067,6 +2070,9 @@ class Project(object):
       cmd.append('--no-tags')
     else:
       cmd.append('--tags')
+
+    if force_sync:
+      cmd.append('--force')
 
     if prune:
       cmd.append('--prune')
@@ -2393,6 +2399,7 @@ class Project(object):
           if m.Has(key, include_defaults=False):
             self.config.SetString(key, m.GetString(key))
         self.config.SetString('filter.lfs.smudge', 'git-lfs smudge --skip -- %f')
+        self.config.SetString('filter.lfs.process', 'git-lfs filter-process --skip')
         if self.manifest.IsMirror:
           self.config.SetString('core.bare', 'true')
         else:
@@ -2606,7 +2613,7 @@ class Project(object):
         cmd.append('-v')
         cmd.append(HEAD)
         if GitCommand(self, cmd).Wait() != 0:
-          raise GitError("cannot initialize work tree")
+          raise GitError("cannot initialize work tree for " + self.name)
 
         if submodules:
           self._SyncSubmodules(quiet=True)
@@ -2706,6 +2713,7 @@ class Project(object):
     def DiffZ(self, name, *args):
       cmd = [name]
       cmd.append('-z')
+      cmd.append('--ignore-submodules')
       cmd.extend(args)
       p = GitCommand(self._project,
                      cmd,
