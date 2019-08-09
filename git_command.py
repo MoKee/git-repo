@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 #
 # Copyright (C) 2008 The Android Open Source Project
 #
@@ -79,22 +80,12 @@ def terminate_ssh_clients():
 _git_version = None
 
 class _GitCall(object):
-  def version(self):
-    p = GitCommand(None, ['--version'], capture_stdout=True)
-    if p.Wait() == 0:
-      if hasattr(p.stdout, 'decode'):
-        return p.stdout.decode('utf-8')
-      else:
-        return p.stdout
-    return None
-
   def version_tuple(self):
     global _git_version
     if _git_version is None:
-      ver_str = git.version()
-      _git_version = Wrapper().ParseGitVersion(ver_str)
+      _git_version = Wrapper().ParseGitVersion()
       if _git_version is None:
-        print('fatal: "%s" unsupported' % ver_str, file=sys.stderr)
+        print('fatal: unable to detect git version', file=sys.stderr)
         sys.exit(1)
     return _git_version
 
@@ -107,13 +98,15 @@ class _GitCall(object):
     return fun
 git = _GitCall()
 
-def git_require(min_version, fail=False):
+def git_require(min_version, fail=False, msg=''):
   git_version = git.version_tuple()
   if min_version <= git_version:
     return True
   if fail:
     need = '.'.join(map(str, min_version))
-    print('fatal: git %s or later required' % need, file=sys.stderr)
+    if msg:
+      msg = ' for ' + msg
+    print('fatal: git %s or later required%s' % (need, msg), file=sys.stderr)
     sys.exit(1)
   return False
 

@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 #
 # Copyright (C) 2008 The Android Open Source Project
 #
@@ -83,6 +84,9 @@ _ONE_DAY_S = 24 * 60 * 60
 class _FetchError(Exception):
   """Internal error thrown in _FetchHelper() when we don't want stack trace."""
   pass
+
+class _CheckoutError(Exception):
+  """Internal error thrown in _CheckoutOne() when we don't want stack trace."""
 
 class Sync(Command, MirrorSafeCommand):
   jobs = 1
@@ -265,7 +269,7 @@ later is required to fix a server side protocol bug.
                  help=SUPPRESS_HELP)
 
   def _FetchProjectList(self, opt, projects, sem, *args, **kwargs):
-    """Main function of the fetch threads when jobs are > 1.
+    """Main function of the fetch threads.
 
     Delegates most of the work to _FetchHelper.
 
@@ -285,7 +289,8 @@ later is required to fix a server side protocol bug.
     finally:
         sem.release()
 
-  def _FetchHelper(self, opt, project, lock, fetched, pm, err_event):
+  def _FetchHelper(self, opt, project, lock, fetched, pm, err_event,
+                   clone_filter):
     """Fetch git objects for a single project.
 
     Args:
@@ -299,6 +304,7 @@ later is required to fix a server side protocol bug.
           lock held).
       err_event: We'll set this event in the case of an error (after printing
           out info about the error).
+      clone_filter: Filter for use in a partial clone.
 
     Returns:
       Whether the fetch was successful.
@@ -311,7 +317,6 @@ later is required to fix a server side protocol bug.
 
     # Encapsulate everything in a try/except/finally so that:
     # - We always set err_event in the case of an exception.
-    # - We always make sure we call sem.release().
     # - We always make sure we unlock the lock if we locked it.
     start = time.time()
     success = False
@@ -324,7 +329,8 @@ later is required to fix a server side protocol bug.
           clone_bundle=not opt.no_clone_bundle,
           no_tags=opt.no_tags, archive=self.manifest.IsArchive,
           optimized_fetch=opt.optimized_fetch,
-          prune=opt.prune)
+          prune=opt.prune,
+          clone_filter=clone_filter)
         self._fetch_times.Set(project, time.time() - start)
 
         # Lock around all the rest of the code, since printing, updating a set
@@ -388,7 +394,8 @@ later is required to fix a server side protocol bug.
                     lock=lock,
                     fetched=fetched,
                     pm=pm,
-                    err_event=err_event)
+                    err_event=err_event,
+                    clone_filter=self.manifest.CloneFilter)
       if self.jobs > 1:
         t = _threading.Thread(target = self._FetchProjectList,
                               kwargs = kwargs)
@@ -415,6 +422,148 @@ later is required to fix a server side protocol bug.
 
     return fetched
 
+  def _CheckoutWorker(self, opt, sem, project, *args, **kwargs):
+    """Main function of the fetch threads.
+
+    Delegates most of the work to _CheckoutOne.
+
+    Args:
+      opt: Program options returned from optparse.  See _Options().
+      projects: Projects to fetch.
+      sem: We'll release() this semaphore when we exit so that another thread
+          can be started up.
+      *args, **kwargs: Remaining arguments to pass to _CheckoutOne. See the
+          _CheckoutOne docstring for details.
+    """
+    try:
+      success = self._CheckoutOne(opt, project, *args, **kwargs)
+      if not success:
+        sys.exit(1)
+    finally:
+      sem.release()
+
+  def _CheckoutOne(self, opt, project, lock, pm, err_event):
+    """Checkout work tree for one project
+
+    Args:
+      opt: Program options returned from optparse.  See _Options().
+      project: Project object for the project to checkout.
+      lock: Lock for accessing objects that are shared amongst multiple
+          _CheckoutWorker() threads.
+      pm: Instance of a Project object.  We will call pm.update() (with our
+          lock held).
+      err_event: We'll set this event in the case of an error (after printing
+          out info about the error).
+
+    Returns:
+      Whether the fetch was successful.
+    """
+    # We'll set to true once we've locked the lock.
+    did_lock = False
+
+    if not opt.quiet:
+      print('Checking out project %s' % project.name)
+
+    # Encapsulate everything in a try/except/finally so that:
+    # - We always set err_event in the case of an exception.
+    # - We always make sure we unlock the lock if we locked it.
+    start = time.time()
+    syncbuf = SyncBuffer(self.manifest.manifestProject.config,
+                         detach_head=opt.detach_head)
+    success = False
+    try:
+      try:
+        project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
+        success = syncbuf.Finish()
+
+        # Lock around all the rest of the code, since printing, updating a set
+        # and Progress.update() are not thread safe.
+        lock.acquire()
+        did_lock = True
+
+        if not success:
+          err_event.set()
+          print('error: Cannot checkout %s' % (project.name),
+                file=sys.stderr)
+          raise _CheckoutError()
+
+        pm.update()
+      except _CheckoutError:
+        pass
+      except Exception as e:
+        print('error: Cannot checkout %s: %s: %s' %
+              (project.name, type(e).__name__, str(e)),
+              file=sys.stderr)
+        err_event.set()
+        raise
+    finally:
+      if did_lock:
+        lock.release()
+      finish = time.time()
+      self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
+                             start, finish, success)
+
+    return success
+
+  def _Checkout(self, all_projects, opt):
+    """Checkout projects listed in all_projects
+
+    Args:
+      all_projects: List of all projects that should be checked out.
+      opt: Program options returned from optparse.  See _Options().
+    """
+
+    # Perform checkouts in multiple threads when we are using partial clone.
+    # Without partial clone, all needed git objects are already downloaded,
+    # in this situation it's better to use only one process because the checkout
+    # would be mostly disk I/O; with partial clone, the objects are only
+    # downloaded when demanded (at checkout time), which is similar to the
+    # Sync_NetworkHalf case and parallelism would be helpful.
+    if self.manifest.CloneFilter:
+      syncjobs = self.jobs
+    else:
+      syncjobs = 1
+
+    lock = _threading.Lock()
+    pm = Progress('Syncing work tree', len(all_projects))
+
+    threads = set()
+    sem = _threading.Semaphore(syncjobs)
+    err_event = _threading.Event()
+
+    for project in all_projects:
+      # Check for any errors before running any more tasks.
+      # ...we'll let existing threads finish, though.
+      if err_event.isSet() and not opt.force_broken:
+        break
+
+      sem.acquire()
+      if project.worktree:
+        kwargs = dict(opt=opt,
+                      sem=sem,
+                      project=project,
+                      lock=lock,
+                      pm=pm,
+                      err_event=err_event)
+        if syncjobs > 1:
+          t = _threading.Thread(target=self._CheckoutWorker,
+                                kwargs=kwargs)
+          # Ensure that Ctrl-C will not freeze the repo process.
+          t.daemon = True
+          threads.add(t)
+          t.start()
+        else:
+          self._CheckoutWorker(**kwargs)
+
+    for t in threads:
+      t.join()
+
+    pm.end()
+    # If we saw an error, exit with code 1 so that other scripts can check.
+    if err_event.isSet():
+      print('\nerror: Exited sync due to checkout errors', file=sys.stderr)
+      sys.exit(1)
+
   def _GCProjects(self, projects):
     gc_gitdirs = {}
     for project in projects:
@@ -435,7 +584,7 @@ later is required to fix a server side protocol bug.
         bare_git.gc('--auto')
       return
 
-    config = {'pack.threads': cpu_count / jobs if cpu_count > jobs else 1}
+    config = {'pack.threads': cpu_count // jobs if cpu_count > jobs else 1}
 
     threads = set()
     sem = _threading.Semaphore(jobs)
@@ -597,7 +746,7 @@ later is required to fix a server side protocol bug.
       self.jobs = opt.jobs
     if self.jobs > 1:
       soft_limit, _ = _rlimit_nofile()
-      self.jobs = min(self.jobs, (soft_limit - 5) / 3)
+      self.jobs = min(self.jobs, (soft_limit - 5) // 3)
 
     if opt.network_only and opt.detach_head:
       print('error: cannot combine -n and -d', file=sys.stderr)
@@ -745,7 +894,8 @@ later is required to fix a server side protocol bug.
                                     current_branch_only=opt.current_branch_only,
                                     no_tags=opt.no_tags,
                                     optimized_fetch=opt.optimized_fetch,
-                                    submodules=self.manifest.HasSubmodules)
+                                    submodules=self.manifest.HasSubmodules,
+                                    clone_filter=self.manifest.CloneFilter)
       finish = time.time()
       self.event_log.AddSync(mp, event_log.TASK_SYNC_NETWORK,
                              start, finish, success)
@@ -845,20 +995,7 @@ later is required to fix a server side protocol bug.
     if self.UpdateProjectList(opt):
       sys.exit(1)
 
-    syncbuf = SyncBuffer(mp.config,
-                         detach_head = opt.detach_head)
-    pm = Progress('Syncing work tree', len(all_projects))
-    for project in all_projects:
-      pm.update()
-      if project.worktree:
-        start = time.time()
-        project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
-        self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
-                               start, time.time(), syncbuf.Recently())
-    pm.end()
-    print(file=sys.stderr)
-    if not syncbuf.Finish():
-      sys.exit(1)
+    self._Checkout(all_projects, opt)
 
     # If there's a notice that's supposed to print at the end of the sync, print
     # it now...

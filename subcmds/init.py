@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 #
 # Copyright (C) 2008 The Android Open Source Project
 #
@@ -114,6 +115,13 @@ to update the working directory files.
     g.add_option('--depth', type='int', default=None,
                  dest='depth',
                  help='create a shallow clone with given depth; see git clone')
+    g.add_option('--partial-clone', action='store_true',
+                 dest='partial_clone',
+                 help='perform partial clone (https://git-scm.com/'
+                 'docs/gitrepository-layout#_code_partialclone_code)')
+    g.add_option('--clone-filter', action='store', default='blob:none',
+                 dest='clone_filter',
+                 help='filter for use with --partial-clone [default: %default]')
     g.add_option('--archive',
                  dest='archive', action='store_true',
                  help='checkout an archive instead of a git repository for '
@@ -252,13 +260,25 @@ to update the working directory files.
               'in another location.', file=sys.stderr)
         sys.exit(1)
 
+    if opt.partial_clone:
+      if opt.mirror:
+        print('fatal: --mirror and --partial-clone are mutually exclusive',
+              file=sys.stderr)
+        sys.exit(1)
+      m.config.SetString('repo.partialclone', 'true')
+      if opt.clone_filter:
+        m.config.SetString('repo.clonefilter', opt.clone_filter)
+    else:
+      opt.clone_filter = None
+
     if opt.submodules:
       m.config.SetString('repo.submodules', 'true')
 
     if not m.Sync_NetworkHalf(is_new=is_new, quiet=opt.quiet,
         clone_bundle=not opt.no_clone_bundle,
         current_branch_only=opt.current_branch_only,
-        no_tags=opt.no_tags, submodules=opt.submodules):
+        no_tags=opt.no_tags, submodules=opt.submodules,
+        clone_filter=opt.clone_filter):
       r = m.GetRemote(m.remote.name)
       print('fatal: cannot obtain manifest %s' % r.url, file=sys.stderr)
 
@@ -293,7 +313,9 @@ to update the working directory files.
       sys.exit(1)
 
   def _Prompt(self, prompt, value):
-    sys.stdout.write('%-10s [%s]: ' % (prompt, value))
+    print('%-10s [%s]: ' % (prompt, value), end='')
+    # TODO: When we require Python 3, use flush=True w/print above.
+    sys.stdout.flush()
     a = sys.stdin.readline().strip()
     if a == '':
       return value
@@ -327,7 +349,9 @@ to update the working directory files.
 
       print()
       print('Your identity is: %s <%s>' % (name, email))
-      sys.stdout.write('is this correct [y/N]? ')
+      print('is this correct [y/N]? ', end='')
+      # TODO: When we require Python 3, use flush=True w/print above.
+      sys.stdout.flush()
       a = sys.stdin.readline().strip().lower()
       if a in ('yes', 'y', 't', 'true'):
         break
@@ -369,7 +393,9 @@ to update the working directory files.
       out.printer(fg='black', attr=c)(' %-6s ', c)
     out.nl()
 
-    sys.stdout.write('Enable color display in this user account (y/N)? ')
+    print('Enable color display in this user account (y/N)? ', end='')
+    # TODO: When we require Python 3, use flush=True w/print above.
+    sys.stdout.flush()
     a = sys.stdin.readline().strip().lower()
     if a in ('y', 'yes', 't', 'true', 'on'):
       gc.SetString('color.ui', 'auto')

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding:utf-8 -*-
 #
 # Copyright (C) 2008 The Android Open Source Project
 #
@@ -13,6 +14,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""The repo tool.
+
+People shouldn't run this directly; instead, they should use the `repo` wrapper
+which takes care of execing this entry point.
+"""
 
 from __future__ import print_function
 import getpass
@@ -316,7 +323,7 @@ def _UserAgent():
     _user_agent = 'git-repo/%s (%s) git/%s Python/%d.%d.%d' % (
       repo_version,
       os_name,
-      '.'.join(map(str, git.version_tuple())),
+      git.version_tuple().full,
       py_version[0], py_version[1], py_version[2])
   return _user_agent
 

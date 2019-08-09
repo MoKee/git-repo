@@ -1,3 +1,5 @@
+# -*- coding:utf-8 -*-
+#
 # Copyright (C) 2008 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -1224,7 +1226,8 @@ class Project(object):
                        archive=False,
                        optimized_fetch=False,
                        prune=False,
-                       submodules=False):
+                       submodules=False,
+                       clone_filter=None):
     """Perform only the network IO portion of the sync process.
        Local working directory/branch state is not affected.
     """
@@ -1307,7 +1310,8 @@ class Project(object):
         not self._RemoteFetch(initial=is_new, quiet=quiet, alt_dir=alt_dir,
                               current_branch_only=current_branch_only,
                               no_tags=no_tags, prune=prune, depth=depth,
-                              submodules=submodules, force_sync=force_sync)):
+                              submodules=submodules, force_sync=force_sync,
+                              clone_filter=clone_filter)):
       return False
 
     mp = self.manifest.manifestProject
@@ -1957,7 +1961,8 @@ class Project(object):
                    prune=False,
                    depth=None,
                    submodules=False,
-                   force_sync=False):
+                   force_sync=False,
+                   clone_filter=None):
 
     is_sha1 = False
     tag_name = None
@@ -2047,6 +2052,11 @@ class Project(object):
         alt_dir = None
 
     cmd = ['fetch']
+
+    if clone_filter:
+      git_require((2, 19, 0), fail=True, msg='partial clones')
+      cmd.append('--filter=%s' % clone_filter)
+      self.config.SetString('extensions.partialclone', self.remote.name)
 
     if depth:
       cmd.append('--depth=%s' % depth)
@@ -2148,12 +2158,12 @@ class Project(object):
           return self._RemoteFetch(name=name,
                                    current_branch_only=current_branch_only,
                                    initial=False, quiet=quiet, alt_dir=alt_dir,
-                                   depth=None)
+                                   depth=None, clone_filter=clone_filter)
         else:
           # Avoid infinite recursion: sync all branches with depth set to None
           return self._RemoteFetch(name=name, current_branch_only=False,
                                    initial=False, quiet=quiet, alt_dir=alt_dir,
-                                   depth=None)
+                                   depth=None, clone_filter=clone_filter)
 
     return ok
 
@@ -2215,13 +2225,17 @@ class Project(object):
         cmd += ['--continue-at', '%d' % (size,)]
       else:
         platform_utils.remove(tmpPath)
-    if 'http_proxy' in os.environ and 'darwin' == sys.platform:
-      cmd += ['--proxy', os.environ['http_proxy']]
-    with GetUrlCookieFile(srcUrl, quiet) as (cookiefile, _proxy):
+    with GetUrlCookieFile(srcUrl, quiet) as (cookiefile, proxy):
       if cookiefile:
         cmd += ['--cookie', cookiefile, '--cookie-jar', cookiefile]
-      if srcUrl.startswith('persistent-'):
-        srcUrl = srcUrl[len('persistent-'):]
+      if proxy:
+        cmd += ['--proxy', proxy]
+      elif 'http_proxy' in os.environ and 'darwin' == sys.platform:
+        cmd += ['--proxy', os.environ['http_proxy']]
+      if srcUrl.startswith('persistent-https'):
+        srcUrl = 'http' + srcUrl[len('persistent-https'):]
+      elif srcUrl.startswith('persistent-http'):
+        srcUrl = 'http' + srcUrl[len('persistent-http'):]
       cmd += [srcUrl]
 
       if IsTrace():
@@ -2255,8 +2269,8 @@ class Project(object):
 
   def _IsValidBundle(self, path, quiet):
     try:
-      with open(path) as f:
-        if f.read(16) == '# v2 git bundle\n':
+      with open(path, 'rb') as f:
+        if f.read(16) == b'# v2 git bundle\n':
           return True
         else:
           if not quiet:
@@ -2831,15 +2845,10 @@ class Project(object):
                      gitdir=self._gitdir,
                      capture_stdout=True,
                      capture_stderr=True)
-      r = []
-      for line in p.process.stdout:
-        if line[-1] == '\n':
-          line = line[:-1]
-        r.append(line)
       if p.Wait() != 0:
         raise GitError('%s rev-list %s: %s' %
                        (self._project.name, str(args), p.stderr))
-      return r
+      return p.stdout.splitlines()
 
     def __getattr__(self, name):
       """Allow arbitrary git commands using pythonic syntax.
