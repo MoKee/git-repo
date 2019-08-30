@@ -71,7 +71,22 @@ branch but need to incorporate new upstream changes "underneath" them.
       if len(args) == 1:
         print('note: project %s is mapped to more than one path' % (args[0],),
             file=sys.stderr)
-      return -1
+      return 1
+
+    # Setup the common git rebase args that we use for all projects.
+    common_args = ['rebase']
+    if opt.whitespace:
+      common_args.append('--whitespace=%s' % opt.whitespace)
+    if opt.quiet:
+      common_args.append('--quiet')
+    if opt.force_rebase:
+      common_args.append('--force-rebase')
+    if opt.no_ff:
+      common_args.append('--no-ff')
+    if opt.autosquash:
+      common_args.append('--autosquash')
+    if opt.interactive:
+      common_args.append('-i')
 
     for project in all_projects:
       cb = project.CurrentBranch
@@ -79,7 +94,7 @@ branch but need to incorporate new upstream changes "underneath" them.
         if one_project:
           print("error: project %s has a detached HEAD" % project.relpath,
                 file=sys.stderr)
-          return -1
+          return 1
         # ignore branches with detatched HEADs
         continue
 
@@ -88,30 +103,11 @@ branch but need to incorporate new upstream changes "underneath" them.
         if one_project:
           print("error: project %s does not track any remote branches"
                 % project.relpath, file=sys.stderr)
-          return -1
+          return 1
         # ignore branches without remotes
         continue
 
-      args = ["rebase"]
-
-      if opt.whitespace:
-        args.append('--whitespace=%s' % opt.whitespace)
-
-      if opt.quiet:
-        args.append('--quiet')
-
-      if opt.force_rebase:
-        args.append('--force-rebase')
-
-      if opt.no_ff:
-        args.append('--no-ff')
-
-      if opt.autosquash:
-        args.append('--autosquash')
-
-      if opt.interactive:
-        args.append("-i")
-
+      args = common_args[:]
       if opt.onto_manifest:
         args.append('--onto')
         args.append(project.revisionExpr)
@@ -131,13 +127,13 @@ branch but need to incorporate new upstream changes "underneath" them.
           stash_args = ["stash"]
 
           if GitCommand(project, stash_args).Wait() != 0:
-            return -1
+            return 1
 
       if GitCommand(project, args).Wait() != 0:
-        return -1
+        return 1
 
       if needs_stash:
         stash_args.append('pop')
         stash_args.append('--quiet')
         if GitCommand(project, stash_args).Wait() != 0:
-          return -1
+          return 1

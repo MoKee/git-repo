@@ -44,7 +44,7 @@ else:
 from signal import SIGTERM
 from error import GitError, UploadError
 import platform_utils
-from trace import Trace
+from repo_trace import Trace
 if is_python3():
   from http.client import HTTPException
 else:
@@ -699,7 +699,8 @@ class Remote(object):
     if not rev.startswith(R_HEADS):
       return rev
 
-    raise GitError('remote %s does not have %s' % (self.name, rev))
+    raise GitError('%s: remote %s does not have %s' %
+                   (self.projectname, self.name, rev))
 
   def WritesTo(self, ref):
     """True if the remote stores to the tracking ref.

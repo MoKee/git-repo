@@ -45,7 +45,7 @@ except ImportError:
 
 from color import SetDefaultColoring
 import event_log
-from trace import SetTrace
+from repo_trace import SetTrace
 from git_command import git, GitCommand
 from git_config import init_ssh, close_ssh
 from command import InteractiveCommand
@@ -84,7 +84,10 @@ global_options.add_option('--color',
                           help='control color usage: auto, always, never')
 global_options.add_option('--trace',
                           dest='trace', action='store_true',
-                          help='trace git command execution')
+                          help='trace git command execution (REPO_TRACE=1)')
+global_options.add_option('--trace-python',
+                          dest='trace_python', action='store_true',
+                          help='trace python command execution')
 global_options.add_option('--time',
                           dest='time', action='store_true',
                           help='time repo command execution')
@@ -102,8 +105,8 @@ class _Repo(object):
     # add 'branch' as an alias for 'branches'
     all_commands['branch'] = all_commands['branches']
 
-  def _Run(self, argv):
-    result = 0
+  def _ParseArgs(self, argv):
+    """Parse the main `repo` command line options."""
     name = None
     glob = []
 
@@ -119,6 +122,12 @@ class _Repo(object):
       name = 'help'
       argv = []
     gopts, _gargs = global_options.parse_args(glob)
+
+    return (name, gopts, argv)
+
+  def _Run(self, name, gopts, argv):
+    """Execute the requested subcommand."""
+    result = 0
 
     if gopts.trace:
       SetTrace()
@@ -188,6 +197,7 @@ class _Repo(object):
     cmd_event = cmd.event_log.Add(name, event_log.TASK_COMMAND, start)
     cmd.event_log.SetParent(cmd_event)
     try:
+      cmd.ValidateOptions(copts, cargs)
       result = cmd.Execute(copts, cargs)
     except (DownloadError, ManifestInvalidRevisionError,
         NoManifestException) as e:
@@ -526,7 +536,15 @@ def _Main(argv):
     try:
       init_ssh()
       init_http()
-      result = repo._Run(argv) or 0
+      name, gopts, argv = repo._ParseArgs(argv)
+      run = lambda: repo._Run(name, gopts, argv) or 0
+      if gopts.trace_python:
+        import trace
+        tracer = trace.Trace(count=False, trace=True, timing=True,
+                             ignoredirs=set(sys.path[1:]))
+        result = tracer.runfunc(run)
+      else:
+        result = run()
     finally:
       close_ssh()
   except KeyboardInterrupt:

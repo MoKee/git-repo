@@ -132,8 +132,8 @@ from the user's .netrc file.
 if the manifest server specified in the manifest file already includes
 credentials.
 
-The -f/--force-broken option can be used to proceed with syncing
-other projects if a project sync fails.
+By default, all projects will be synced. The --fail-fast option can be used
+to halt syncing as soon as possible when the the first project fails to sync.
 
 The --force-sync option can be used to overwrite existing git
 directories if they have previously been linked to a different
@@ -199,8 +199,10 @@ later is required to fix a server side protocol bug.
       self.jobs = 1
 
     p.add_option('-f', '--force-broken',
-                 dest='force_broken', action='store_true',
-                 help="continue sync even if a project fails to sync")
+                 help='obsolete option (to be deleted in the future)')
+    p.add_option('--fail-fast',
+                 dest='fail_fast', action='store_true',
+                 help='stop syncing after first error is hit')
     p.add_option('--force-sync',
                  dest='force_sync', action='store_true',
                  help="overwrite an existing git directory if it needs to "
@@ -284,7 +286,7 @@ later is required to fix a server side protocol bug.
     try:
         for project in projects:
           success = self._FetchHelper(opt, project, *args, **kwargs)
-          if not success and not opt.force_broken:
+          if not success and opt.fail_fast:
             break
     finally:
         sem.release()
@@ -343,10 +345,7 @@ later is required to fix a server side protocol bug.
           print('error: Cannot fetch %s from %s'
                 % (project.name, project.remote.url),
                 file=sys.stderr)
-          if opt.force_broken:
-            print('warn: --force-broken, continuing to sync',
-                  file=sys.stderr)
-          else:
+          if opt.fail_fast:
             raise _FetchError()
 
         fetched.add(project.gitdir)
@@ -384,7 +383,7 @@ later is required to fix a server side protocol bug.
     for project_list in objdir_project_map.values():
       # Check for any errors before running any more tasks.
       # ...we'll let existing threads finish, though.
-      if err_event.isSet() and not opt.force_broken:
+      if err_event.isSet() and opt.fail_fast:
         break
 
       sem.acquire()
@@ -410,7 +409,7 @@ later is required to fix a server side protocol bug.
       t.join()
 
     # If we saw an error, exit with code 1 so that other scripts can check.
-    if err_event.isSet() and not opt.force_broken:
+    if err_event.isSet() and opt.fail_fast:
       print('\nerror: Exited sync due to fetch errors', file=sys.stderr)
       sys.exit(1)
 
@@ -436,9 +435,7 @@ later is required to fix a server side protocol bug.
           _CheckoutOne docstring for details.
     """
     try:
-      success = self._CheckoutOne(opt, project, *args, **kwargs)
-      if not success:
-        sys.exit(1)
+      return self._CheckoutOne(opt, project, *args, **kwargs)
     finally:
       sem.release()
 
@@ -534,7 +531,7 @@ later is required to fix a server side protocol bug.
     for project in all_projects:
       # Check for any errors before running any more tasks.
       # ...we'll let existing threads finish, though.
-      if err_event.isSet() and not opt.force_broken:
+      if err_event.isSet() and opt.fail_fast:
         break
 
       sem.acquire()
@@ -637,7 +634,7 @@ later is required to fix a server side protocol bug.
       print('Failed to remove %s (%s)' % (os.path.join(path, '.git'), str(e)), file=sys.stderr)
       print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
       print('       remove manually, then run sync again', file=sys.stderr)
-      return -1
+      return 1
 
     # Delete everything under the worktree, except for directories that contain
     # another git project
@@ -671,7 +668,7 @@ later is required to fix a server side protocol bug.
     if failed:
       print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
       print('       remove manually, then run sync again', file=sys.stderr)
-      return -1
+      return 1
 
     # Try deleting parent dirs if they are empty
     project_dir = path
@@ -728,9 +725,9 @@ later is required to fix a server side protocol bug.
                     'are present' % project.relpath, file=sys.stderr)
               print('       commit changes, then run sync again',
                     file=sys.stderr)
-              return -1
+              return 1
             elif self._DeleteProject(project.worktree):
-              return -1
+              return 1
 
     new_project_paths.sort()
     fd = open(file_path, 'w')
@@ -741,33 +738,30 @@ later is required to fix a server side protocol bug.
       fd.close()
     return 0
 
+  def ValidateOptions(self, opt, args):
+    if opt.force_broken:
+      print('warning: -f/--force-broken is now the default behavior, and the '
+            'options are deprecated', file=sys.stderr)
+    if opt.network_only and opt.detach_head:
+      self.OptionParser.error('cannot combine -n and -d')
+    if opt.network_only and opt.local_only:
+      self.OptionParser.error('cannot combine -n and -l')
+    if opt.manifest_name and opt.smart_sync:
+      self.OptionParser.error('cannot combine -m and -s')
+    if opt.manifest_name and opt.smart_tag:
+      self.OptionParser.error('cannot combine -m and -t')
+    if opt.manifest_server_username or opt.manifest_server_password:
+      if not (opt.smart_sync or opt.smart_tag):
+        self.OptionParser.error('-u and -p may only be combined with -s or -t')
+      if None in [opt.manifest_server_username, opt.manifest_server_password]:
+        self.OptionParser.error('both -u and -p must be given')
+
   def Execute(self, opt, args):
     if opt.jobs:
       self.jobs = opt.jobs
     if self.jobs > 1:
       soft_limit, _ = _rlimit_nofile()
       self.jobs = min(self.jobs, (soft_limit - 5) // 3)
-
-    if opt.network_only and opt.detach_head:
-      print('error: cannot combine -n and -d', file=sys.stderr)
-      sys.exit(1)
-    if opt.network_only and opt.local_only:
-      print('error: cannot combine -n and -l', file=sys.stderr)
-      sys.exit(1)
-    if opt.manifest_name and opt.smart_sync:
-      print('error: cannot combine -m and -s', file=sys.stderr)
-      sys.exit(1)
-    if opt.manifest_name and opt.smart_tag:
-      print('error: cannot combine -m and -t', file=sys.stderr)
-      sys.exit(1)
-    if opt.manifest_server_username or opt.manifest_server_password:
-      if not (opt.smart_sync or opt.smart_tag):
-        print('error: -u and -p may only be combined with -s or -t',
-              file=sys.stderr)
-        sys.exit(1)
-      if None in [opt.manifest_server_username, opt.manifest_server_password]:
-        print('error: both -u and -p must be given', file=sys.stderr)
-        sys.exit(1)
 
     if opt.manifest_name:
       self.manifest.Override(opt.manifest_name)
