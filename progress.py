@@ -52,7 +52,7 @@ class Progress(object):
         return
 
     if self._total <= 0:
-      sys.stderr.write('%s\r%s: %d,' % (
+      sys.stderr.write('%s\r\033[1;33m%s: %d,\033[0;0m' % (
         CSI_ERASE_LINE,
         self._title,
         self._done))
@@ -62,7 +62,7 @@ class Progress(object):
 
       if self._lastp != p or self._always_print_percentage:
         self._lastp = p
-        sys.stderr.write('%s\r%s: %3d%% (%d%s/%d%s)%s' % (
+        sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s)\033[0;0m%s' % (
           CSI_ERASE_LINE,
           self._title,
           p,
@@ -76,14 +76,14 @@ class Progress(object):
       return
 
     if self._total <= 0:
-      sys.stderr.write('%s\r%s: %d, done.\n' % (
+      sys.stderr.write('%s\r\033[1;33m%s: %d, done.\033[0;0m\n' % (
         CSI_ERASE_LINE,
         self._title,
         self._done))
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
-      sys.stderr.write('%s\r%s: %3d%% (%d%s/%d%s), done.\n' % (
+      sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s), done.\033[0;0m\n' % (
         CSI_ERASE_LINE,
         self._title,
         p,
