@@ -18,6 +18,7 @@
 
 from __future__ import print_function
 
+import re
 import unittest
 
 import git_command
@@ -47,3 +48,31 @@ class GitCallUnitTest(unittest.TestCase):
     self.assertLess(ver, (9999, 9999, 9999))
 
     self.assertNotEqual('', ver.full)
+
+
+class UserAgentUnitTest(unittest.TestCase):
+  """Tests the UserAgent function."""
+
+  def test_smoke_os(self):
+    """Make sure UA OS setting returns something useful."""
+    os_name = git_command.user_agent.os
+    # We can't dive too deep because of OS/tool differences, but we can check
+    # the general form.
+    m = re.match(r'^[^ ]+$', os_name)
+    self.assertIsNotNone(m)
+
+  def test_smoke_repo(self):
+    """Make sure repo UA returns something useful."""
+    ua = git_command.user_agent.repo
+    # We can't dive too deep because of OS/tool differences, but we can check
+    # the general form.
+    m = re.match(r'^git-repo/[^ ]+ ([^ ]+) git/[^ ]+ Python/[0-9.]+', ua)
+    self.assertIsNotNone(m)
+
+  def test_smoke_git(self):
+    """Make sure git UA returns something useful."""
+    ua = git_command.user_agent.git
+    # We can't dive too deep because of OS/tool differences, but we can check
+    # the general form.
+    m = re.match(r'^git/[^ ]+ ([^ ]+) git-repo/[^ ]+', ua)
+    self.assertIsNotNone(m)

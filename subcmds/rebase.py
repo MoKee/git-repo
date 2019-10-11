@@ -17,8 +17,17 @@
 from __future__ import print_function
 import sys
 
+from color import Coloring
 from command import Command
 from git_command import GitCommand
+
+
+class RebaseColoring(Coloring):
+  def __init__(self, config):
+    Coloring.__init__(self, config, 'rebase')
+    self.project = self.printer('project', attr='bold')
+    self.fail = self.printer('fail', fg='red')
+
 
 class Rebase(Command):
   common = True
@@ -37,6 +46,9 @@ branch but need to incorporate new upstream changes "underneath" them.
                 dest="interactive", action="store_true",
                 help="interactive rebase (single project only)")
 
+    p.add_option('--fail-fast',
+                 dest='fail_fast', action='store_true',
+                 help='Stop rebasing after first error is hit')
     p.add_option('-f', '--force-rebase',
                  dest='force_rebase', action='store_true',
                  help='Pass --force-rebase to git rebase')
@@ -88,7 +100,15 @@ branch but need to incorporate new upstream changes "underneath" them.
     if opt.interactive:
       common_args.append('-i')
 
+    config = self.manifest.manifestProject.config
+    out = RebaseColoring(config)
+    out.redirect(sys.stdout)
+
+    ret = 0
     for project in all_projects:
+      if ret and opt.fail_fast:
+        break
+
       cb = project.CurrentBranch
       if not cb:
         if one_project:
@@ -114,8 +134,10 @@ branch but need to incorporate new upstream changes "underneath" them.
 
       args.append(upbranch.LocalMerge)
 
-      print('# %s: rebasing %s -> %s'
-            % (project.relpath, cb, upbranch.LocalMerge), file=sys.stderr)
+      out.project('project %s: rebasing %s -> %s',
+                  project.relpath, cb, upbranch.LocalMerge)
+      out.nl()
+      out.flush()
 
       needs_stash = False
       if opt.auto_stash:
@@ -127,13 +149,21 @@ branch but need to incorporate new upstream changes "underneath" them.
           stash_args = ["stash"]
 
           if GitCommand(project, stash_args).Wait() != 0:
-            return 1
+            ret += 1
+            continue
 
       if GitCommand(project, args).Wait() != 0:
-        return 1
+        ret += 1
+        continue
 
       if needs_stash:
         stash_args.append('pop')
         stash_args.append('--quiet')
         if GitCommand(project, stash_args).Wait() != 0:
-          return 1
+          ret += 1
+
+    if ret:
+      out.fail('%i projects had errors', ret)
+      out.nl()
+
+    return ret

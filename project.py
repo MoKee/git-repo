@@ -230,6 +230,7 @@ class DiffColoring(Coloring):
   def __init__(self, config):
     Coloring.__init__(self, config, 'diff')
     self.project = self.printer('header', attr='bold')
+    self.fail = self.printer('fail', fg='red')
 
 
 class _Annotation(object):
@@ -865,10 +866,17 @@ class Project(object):
   @property
   def CurrentBranch(self):
     """Obtain the name of the currently checked out branch.
-       The branch name omits the 'refs/heads/' prefix.
-       None is returned if the project is on a detached HEAD.
+
+    The branch name omits the 'refs/heads/' prefix.
+    None is returned if the project is on a detached HEAD, or if the work_git is
+    otheriwse inaccessible (e.g. an incomplete sync).
     """
-    b = self.work_git.GetHead()
+    try:
+      b = self.work_git.GetHead()
+    except NoManifestException:
+      # If the local checkout is in a bad state, don't barf.  Let the callers
+      # process this like the head is unreadable.
+      return None
     if b.startswith(R_HEADS):
       return b[len(R_HEADS):]
     return None
@@ -1136,10 +1144,18 @@ class Project(object):
       cmd.append('--src-prefix=a/%s/' % self.relpath)
       cmd.append('--dst-prefix=b/%s/' % self.relpath)
     cmd.append('--')
-    p = GitCommand(self,
-                   cmd,
-                   capture_stdout=True,
-                   capture_stderr=True)
+    try:
+      p = GitCommand(self,
+                     cmd,
+                     capture_stdout=True,
+                     capture_stderr=True)
+    except GitError as e:
+      out.nl()
+      out.project('project %s/' % self.relpath)
+      out.nl()
+      out.fail('%s', str(e))
+      out.nl()
+      return False
     has_diff = False
     for line in p.process.stdout:
       if not hasattr(line, 'encode'):
@@ -1150,7 +1166,7 @@ class Project(object):
         out.nl()
         has_diff = True
       print(line[:-1])
-    p.Wait()
+    return p.Wait() == 0
 
 
 # Publish / Upload ##
