@@ -523,7 +523,9 @@ later is required to fix a server side protocol bug.
       syncjobs = 1
 
     lock = _threading.Lock()
-    pm = Progress('Syncing work tree', len(all_projects))
+    pm = Progress('Syncing work tree', len(all_projects),
+                  print_newline=not(opt.quiet),
+                  always_print_percentage=opt.quiet)
 
     threads = set()
     sem = _threading.Semaphore(syncjobs)
