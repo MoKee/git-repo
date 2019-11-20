@@ -58,11 +58,8 @@ else:
 def _lwrite(path, content):
   lock = '%s.lock' % path
 
-  fd = open(lock, 'w')
-  try:
+  with open(lock, 'w') as fd:
     fd.write(content)
-  finally:
-    fd.close()
 
   try:
     platform_utils.rename(lock, path)
@@ -137,6 +134,7 @@ class DownloadedChange(object):
 
 class ReviewableBranch(object):
   _commit_cache = None
+  _base_exists = None
 
   def __init__(self, project, branch, base):
     self.project = project
@@ -150,14 +148,19 @@ class ReviewableBranch(object):
   @property
   def commits(self):
     if self._commit_cache is None:
-      self._commit_cache = self.project.bare_git.rev_list('--abbrev=8',
-                                                          '--abbrev-commit',
-                                                          '--pretty=oneline',
-                                                          '--reverse',
-                                                          '--date-order',
-                                                          not_rev(self.base),
-                                                          R_HEADS + self.name,
-                                                          '--')
+      args = ('--abbrev=8', '--abbrev-commit', '--pretty=oneline', '--reverse',
+              '--date-order', not_rev(self.base), R_HEADS + self.name, '--')
+      try:
+        self._commit_cache = self.project.bare_git.rev_list(*args)
+      except GitError:
+        # We weren't able to probe the commits for this branch.  Was it tracking
+        # a branch that no longer exists?  If so, return no commits.  Otherwise,
+        # rethrow the error as we don't know what's going on.
+        if self.base_exists:
+          raise
+
+        self._commit_cache = []
+
     return self._commit_cache
 
   @property
@@ -175,6 +178,23 @@ class ReviewableBranch(object):
                                      '-n', '1',
                                      R_HEADS + self.name,
                                      '--')
+
+  @property
+  def base_exists(self):
+    """Whether the branch we're tracking exists.
+
+    Normally it should, but sometimes branches we track can get deleted.
+    """
+    if self._base_exists is None:
+      try:
+        self.project.bare_git.rev_parse('--verify', not_rev(self.base))
+        # If we're still here, the base branch exists.
+        self._base_exists = True
+      except GitError:
+        # If we failed to verify, the base branch doesn't exist.
+        self._base_exists = False
+
+    return self._base_exists
 
   def UploadForReview(self, people,
                       auto_topic=False,
@@ -1393,12 +1413,9 @@ class Project(object):
     if is_new:
       alt = os.path.join(self.gitdir, 'objects/info/alternates')
       try:
-        fd = open(alt)
-        try:
+        with open(alt) as fd:
           # This works for both absolute and relative alternate directories.
           alt_dir = os.path.join(self.objdir, 'objects', fd.readline().rstrip())
-        finally:
-          fd.close()
       except IOError:
         alt_dir = None
     else:
@@ -1505,6 +1522,13 @@ class Project(object):
     """Perform only the local IO portion of the sync process.
        Network access is not required.
     """
+    if not os.path.exists(self.gitdir):
+      syncbuf.fail(self,
+                   'Cannot checkout %s due to missing network sync; Run '
+                   '`repo sync -n %s` first.' %
+                   (self.name, self.name))
+      return
+
     self._InitWorkTree(force_sync=force_sync, submodules=submodules)
     all_refs = self.bare_ref.all
     self.CleanPublishedCache(all_refs)
@@ -1585,7 +1609,16 @@ class Project(object):
       return
 
     upstream_gain = self._revlist(not_rev(HEAD), revid)
-    pub = self.WasPublished(branch.name, all_refs)
+
+    # See if we can perform a fast forward merge.  This can happen if our
+    # branch isn't in the exact same state as we last published.
+    try:
+      self.work_git.merge_base('--is-ancestor', HEAD, revid)
+      # Skip the published logic.
+      pub = False
+    except GitError:
+      pub = self.WasPublished(branch.name, all_refs)
+
     if pub:
       not_merged = self._revlist(not_rev(revid), pub)
       if not_merged:
@@ -2728,41 +2761,45 @@ class Project(object):
           raise
 
   def _InitWorkTree(self, force_sync=False, submodules=False):
-    dotgit = os.path.join(self.worktree, '.git')
-    init_dotgit = not os.path.exists(dotgit)
+    realdotgit = os.path.join(self.worktree, '.git')
+    tmpdotgit = realdotgit + '.tmp'
+    init_dotgit = not os.path.exists(realdotgit)
+    if init_dotgit:
+      dotgit = tmpdotgit
+      platform_utils.rmtree(tmpdotgit, ignore_errors=True)
+      os.makedirs(tmpdotgit)
+      self._ReferenceGitDir(self.gitdir, tmpdotgit, share_refs=True,
+                            copy_all=False)
+    else:
+      dotgit = realdotgit
+
     try:
-      if init_dotgit:
-        os.makedirs(dotgit)
-        self._ReferenceGitDir(self.gitdir, dotgit, share_refs=True,
-                              copy_all=False)
+      self._CheckDirReference(self.gitdir, dotgit, share_refs=True)
+    except GitError as e:
+      if force_sync and not init_dotgit:
+        try:
+          platform_utils.rmtree(dotgit)
+          return self._InitWorkTree(force_sync=False, submodules=submodules)
+        except:
+          raise e
+      raise e
 
-      try:
-        self._CheckDirReference(self.gitdir, dotgit, share_refs=True)
-      except GitError as e:
-        if force_sync:
-          try:
-            platform_utils.rmtree(dotgit)
-            return self._InitWorkTree(force_sync=False, submodules=submodules)
-          except:
-            raise e
-        raise e
+    if init_dotgit:
+      _lwrite(os.path.join(tmpdotgit, HEAD), '%s\n' % self.GetRevisionId())
 
-      if init_dotgit:
-        _lwrite(os.path.join(dotgit, HEAD), '%s\n' % self.GetRevisionId())
+      # Now that the .git dir is fully set up, move it to its final home.
+      platform_utils.rename(tmpdotgit, realdotgit)
 
-        cmd = ['read-tree', '--reset', '-u']
-        cmd.append('-v')
-        cmd.append(HEAD)
-        if GitCommand(self, cmd).Wait() != 0:
-          raise GitError("cannot initialize work tree for " + self.name)
+      # Finish checking out the worktree.
+      cmd = ['read-tree', '--reset', '-u']
+      cmd.append('-v')
+      cmd.append(HEAD)
+      if GitCommand(self, cmd).Wait() != 0:
+        raise GitError('Cannot initialize work tree for ' + self.name)
 
-        if submodules:
-          self._SyncSubmodules(quiet=True)
-        self._CopyAndLinkFiles()
-    except Exception:
-      if init_dotgit:
-        platform_utils.rmtree(dotgit)
-      raise
+      if submodules:
+        self._SyncSubmodules(quiet=True)
+      self._CopyAndLinkFiles()
 
   def _get_symlink_error_message(self):
     if platform_utils.isWindows():
@@ -2911,13 +2948,10 @@ class Project(object):
       else:
         path = os.path.join(self._project.worktree, '.git', HEAD)
       try:
-        fd = open(path)
+        with open(path) as fd:
+          line = fd.readline()
       except IOError as e:
         raise NoManifestException(path, str(e))
-      try:
-        line = fd.readline()
-      finally:
-        fd.close()
       try:
         line = line.decode()
       except AttributeError:

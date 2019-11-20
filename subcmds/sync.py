@@ -315,9 +315,6 @@ later is required to fix a server side protocol bug.
     # We'll set to true once we've locked the lock.
     did_lock = False
 
-    if not opt.quiet:
-      print('Fetching project %s' % project.name)
-
     # Encapsulate everything in a try/except/finally so that:
     # - We always set err_event in the case of an exception.
     # - We always make sure we unlock the lock if we locked it.
@@ -350,7 +347,7 @@ later is required to fix a server side protocol bug.
             raise _FetchError()
 
         fetched.add(project.gitdir)
-        pm.update()
+        pm.update(msg=project.name)
       except _FetchError:
         pass
       except Exception as e:
@@ -371,7 +368,6 @@ later is required to fix a server side protocol bug.
     fetched = set()
     lock = _threading.Lock()
     pm = Progress('Fetching projects', len(projects),
-                  print_newline=not(opt.quiet),
                   always_print_percentage=opt.quiet)
 
     objdir_project_map = dict()
@@ -440,7 +436,7 @@ later is required to fix a server side protocol bug.
     finally:
       sem.release()
 
-  def _CheckoutOne(self, opt, project, lock, pm, err_event):
+  def _CheckoutOne(self, opt, project, lock, pm, err_event, err_results):
     """Checkout work tree for one project
 
     Args:
@@ -452,15 +448,14 @@ later is required to fix a server side protocol bug.
           lock held).
       err_event: We'll set this event in the case of an error (after printing
           out info about the error).
+      err_results: A list of strings, paths to git repos where checkout
+          failed.
 
     Returns:
       Whether the fetch was successful.
     """
     # We'll set to true once we've locked the lock.
     did_lock = False
-
-    if not opt.quiet:
-      print('Checking out project %s' % project.name)
 
     # Encapsulate everything in a try/except/finally so that:
     # - We always set err_event in the case of an exception.
@@ -472,11 +467,11 @@ later is required to fix a server side protocol bug.
     try:
       try:
         project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
-        success = syncbuf.Finish()
 
         # Lock around all the rest of the code, since printing, updating a set
         # and Progress.update() are not thread safe.
         lock.acquire()
+        success = syncbuf.Finish()
         did_lock = True
 
         if not success:
@@ -485,7 +480,7 @@ later is required to fix a server side protocol bug.
                 file=sys.stderr)
           raise _CheckoutError()
 
-        pm.update()
+        pm.update(msg=project.name)
       except _CheckoutError:
         pass
       except Exception as e:
@@ -496,6 +491,8 @@ later is required to fix a server side protocol bug.
         raise
     finally:
       if did_lock:
+        if not success:
+          err_results.append(project.relpath)
         lock.release()
       finish = time.time()
       self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
@@ -523,13 +520,14 @@ later is required to fix a server side protocol bug.
       syncjobs = 1
 
     lock = _threading.Lock()
-    pm = Progress('Syncing work tree', len(all_projects),
+    pm = Progress('Checking out projects', len(all_projects),
                   print_newline=not(opt.quiet),
                   always_print_percentage=opt.quiet)
 
     threads = set()
     sem = _threading.Semaphore(syncjobs)
     err_event = _threading.Event()
+    err_results = []
 
     for project in all_projects:
       # Check for any errors before running any more tasks.
@@ -544,7 +542,8 @@ later is required to fix a server side protocol bug.
                       project=project,
                       lock=lock,
                       pm=pm,
-                      err_event=err_event)
+                      err_event=err_event,
+                      err_results=err_results)
         if syncjobs > 1:
           t = _threading.Thread(target=self._CheckoutWorker,
                                 kwargs=kwargs)
@@ -562,6 +561,9 @@ later is required to fix a server side protocol bug.
     # If we saw an error, exit with code 1 so that other scripts can check.
     if err_event.isSet():
       print('\nerror: Exited sync due to checkout errors', file=sys.stderr)
+      if err_results:
+        print('Failing repos:\n%s' % '\n'.join(err_results),
+              file=sys.stderr)
       sys.exit(1)
 
   def _GCProjects(self, projects):
@@ -694,11 +696,8 @@ later is required to fix a server side protocol bug.
     old_project_paths = []
 
     if os.path.exists(file_path):
-      fd = open(file_path, 'r')
-      try:
+      with open(file_path, 'r') as fd:
         old_project_paths = fd.read().split('\n')
-      finally:
-        fd.close()
       # In reversed order, so subfolders are deleted before parent folder.
       for path in sorted(old_project_paths, reverse=True):
         if not path:
@@ -733,12 +732,9 @@ later is required to fix a server side protocol bug.
               return 1
 
     new_project_paths.sort()
-    fd = open(file_path, 'w')
-    try:
+    with open(file_path, 'w') as fd:
       fd.write('\n'.join(new_project_paths))
       fd.write('\n')
-    finally:
-      fd.close()
     return 0
 
   def _SmartSyncSetup(self, opt, smart_sync_manifest_path):
@@ -811,11 +807,8 @@ later is required to fix a server side protocol bug.
       if success:
         manifest_name = os.path.basename(smart_sync_manifest_path)
         try:
-          f = open(smart_sync_manifest_path, 'w')
-          try:
+          with open(smart_sync_manifest_path, 'w') as f:
             f.write(manifest_str)
-          finally:
-            f.close()
         except IOError as e:
           print('error: cannot write manifest to %s:\n%s'
                 % (smart_sync_manifest_path, e),
@@ -1104,11 +1097,8 @@ class _FetchTimes(object):
   def _Load(self):
     if self._times is None:
       try:
-        f = open(self._path)
-        try:
+        with open(self._path) as f:
           self._times = json.load(f)
-        finally:
-          f.close()
       except (IOError, ValueError):
         try:
           platform_utils.remove(self._path)
@@ -1128,11 +1118,8 @@ class _FetchTimes(object):
       del self._times[name]
 
     try:
-      f = open(self._path, 'w')
-      try:
+      with open(self._path, 'w') as f:
         json.dump(self._times, f, indent=2)
-      finally:
-        f.close()
     except (IOError, TypeError):
       try:
         platform_utils.remove(self._path)
