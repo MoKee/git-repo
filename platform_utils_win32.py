@@ -16,6 +16,7 @@
 
 import errno
 
+from pyversion import is_python3
 from ctypes import WinDLL, get_last_error, FormatError, WinError, addressof
 from ctypes import c_buffer
 from ctypes.wintypes import BOOL, BOOLEAN, LPCWSTR, DWORD, HANDLE, POINTER, c_ubyte
@@ -179,7 +180,7 @@ def readlink(path):
   if reparse_point_handle == INVALID_HANDLE_VALUE:
     _raise_winerror(
         get_last_error(),
-        'Error opening symblic link \"%s\"'.format(path))
+        'Error opening symbolic link \"%s\"'.format(path))
   target_buffer = c_buffer(MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
   n_bytes_returned = DWORD()
   io_result = DeviceIoControl(reparse_point_handle,
@@ -194,7 +195,7 @@ def readlink(path):
   if not io_result:
     _raise_winerror(
         get_last_error(),
-        'Error reading symblic link \"%s\"'.format(path))
+        'Error reading symbolic link \"%s\"'.format(path))
   rdb = REPARSE_DATA_BUFFER.from_buffer(target_buffer)
   if rdb.ReparseTag == IO_REPARSE_TAG_SYMLINK:
     return _preserve_encoding(path, rdb.SymbolicLinkReparseBuffer.PrintName)
@@ -203,11 +204,15 @@ def readlink(path):
   # Unsupported reparse point type
   _raise_winerror(
       ERROR_NOT_SUPPORTED,
-      'Error reading symblic link \"%s\"'.format(path))
+      'Error reading symbolic link \"%s\"'.format(path))
 
 
 def _preserve_encoding(source, target):
   """Ensures target is the same string type (i.e. unicode or str) as source."""
+
+  if is_python3():
+    return target
+
   if isinstance(source, unicode):
     return unicode(target)
   return str(target)
