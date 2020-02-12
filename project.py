@@ -1989,7 +1989,7 @@ class Project(object):
       gitmodules_lines = []
       fd, temp_gitmodules_path = tempfile.mkstemp()
       try:
-        os.write(fd, p.stdout)
+        os.write(fd, p.stdout.encode('utf-8'))
         os.close(fd)
         cmd = ['config', '--file', temp_gitmodules_path, '--list']
         p = GitCommand(None, cmd, capture_stdout=True, capture_stderr=True,
@@ -2398,7 +2398,7 @@ class Project(object):
         platform_utils.remove(tmpPath)
     with GetUrlCookieFile(srcUrl, quiet) as (cookiefile, proxy):
       if cookiefile:
-        cmd += ['--cookie', cookiefile, '--cookie-jar', cookiefile]
+        cmd += ['--cookie', cookiefile]
       if proxy:
         cmd += ['--proxy', proxy]
       elif 'http_proxy' in os.environ and 'darwin' == sys.platform:
