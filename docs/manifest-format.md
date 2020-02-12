@@ -89,6 +89,7 @@ following DTD:
   <!ATTLIST extend-project path CDATA #IMPLIED>
   <!ATTLIST extend-project groups CDATA #IMPLIED>
   <!ATTLIST extend-project revision CDATA #IMPLIED>
+  <!ATTLIST extend-project remote CDATA #IMPLIED>
 
   <!ELEMENT remove-project EMPTY>
   <!ATTLIST remove-project name  CDATA #REQUIRED>
@@ -306,6 +307,9 @@ belongs.  Same syntax as the corresponding element of `project`.
 Attribute `revision`: If specified, overrides the revision of the original
 project.  Same syntax as the corresponding element of `project`.
 
+Attribute `remote`: If specified, overrides the remote of the original
+project.  Same syntax as the corresponding element of `project`.
+
 ### Element annotation
 
 Zero or more annotation elements may be specified as children of a
@@ -338,7 +342,7 @@ It's just like copyfile and runs at the same time as copyfile but
 instead of copying it creates a symlink.
 
 The symlink is created at "dest" (relative to the top of the tree) and
-points to the path specified by "src".
+points to the path specified by "src" which is a path in the project.
 
 Parent directories of "dest" will be automatically created if missing.
 

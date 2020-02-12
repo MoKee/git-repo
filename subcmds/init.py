@@ -34,7 +34,7 @@ from command import InteractiveCommand, MirrorSafeCommand
 from error import ManifestParseError
 from project import SyncBuffer
 from git_config import GitConfig
-from git_command import git_require, MIN_GIT_VERSION
+from git_command import git_require, MIN_GIT_VERSION_SOFT, MIN_GIT_VERSION_HARD
 import platform_utils
 
 class Init(InteractiveCommand, MirrorSafeCommand):
@@ -81,7 +81,7 @@ manifest, a subsequent `repo sync` (or `repo sync -d`) is necessary
 to update the working directory files.
 """
 
-  def _Options(self, p):
+  def _Options(self, p, gitc_init=False):
     # Logging
     g = p.add_option_group('Logging options')
     g.add_option('-q', '--quiet',
@@ -96,7 +96,12 @@ to update the working directory files.
     g.add_option('-b', '--manifest-branch',
                  dest='manifest_branch',
                  help='manifest branch or revision', metavar='REVISION')
-    g.add_option('-c', '--current-branch',
+    cbr_opts = ['--current-branch']
+    # The gitc-init subcommand allocates -c itself, but a lot of init users
+    # want -c, so try to satisfy both as best we can.
+    if not gitc_init:
+      cbr_opts += ['-c']
+    g.add_option(*cbr_opts,
                  dest='current_branch_only', action='store_true',
                  help='fetch only current manifest branch from server')
     g.add_option('-m', '--manifest-name',
@@ -446,7 +451,12 @@ to update the working directory files.
       self.OptionParser.error('--mirror and --archive cannot be used together.')
 
   def Execute(self, opt, args):
-    git_require(MIN_GIT_VERSION, fail=True)
+    git_require(MIN_GIT_VERSION_HARD, fail=True)
+    if not git_require(MIN_GIT_VERSION_SOFT):
+      print('repo: warning: git-%s+ will soon be required; please upgrade your '
+            'version of git to maintain support.'
+            % ('.'.join(str(x) for x in MIN_GIT_VERSION_SOFT),),
+            file=sys.stderr)
 
     self._SyncManifest(opt)
     self._LinkManifest(opt.manifest_name)
