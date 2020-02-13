@@ -26,6 +26,7 @@ _NOT_TTY = not os.isatty(2)
 # column 0.
 CSI_ERASE_LINE = '\x1b[2K'
 
+
 class Progress(object):
   def __init__(self, title, total=0, units='', print_newline=False,
                always_print_percentage=False):
@@ -53,9 +54,9 @@ class Progress(object):
 
     if self._total <= 0:
       sys.stderr.write('%s\r\033[1;33m%s: %d,\033[0;0m' % (
-        CSI_ERASE_LINE,
-        self._title,
-        self._done))
+          CSI_ERASE_LINE,
+          self._title,
+          self._done))
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
@@ -63,13 +64,13 @@ class Progress(object):
       if self._lastp != p or self._always_print_percentage:
         self._lastp = p
         sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s)\033[0;0m %s%s%s' % (
-          CSI_ERASE_LINE,
-          self._title,
-          p,
-          self._done, self._units,
-          self._total, self._units,
-          ' ' if msg else '', msg,
-          "\n" if self._print_newline else ""))
+            CSI_ERASE_LINE,
+            self._title,
+            p,
+            self._done, self._units,
+            self._total, self._units,
+            ' ' if msg else '', msg,
+            "\n" if self._print_newline else ""))
         sys.stderr.flush()
 
   def end(self):
@@ -78,16 +79,16 @@ class Progress(object):
 
     if self._total <= 0:
       sys.stderr.write('%s\r\033[1;33m%s: %d, done.\033[0;0m\n' % (
-        CSI_ERASE_LINE,
-        self._title,
-        self._done))
+          CSI_ERASE_LINE,
+          self._title,
+          self._done))
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
       sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s), done.\033[0;0m\n' % (
-        CSI_ERASE_LINE,
-        self._title,
-        p,
-        self._done, self._units,
-        self._total, self._units))
+          CSI_ERASE_LINE,
+          self._title,
+          p,
+          self._done, self._units,
+          self._total, self._units))
       sys.stderr.flush()

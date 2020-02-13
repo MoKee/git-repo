@@ -15,9 +15,9 @@
 # limitations under the License.
 
 from __future__ import print_function
-import sys
 
 from command import Command, MirrorSafeCommand
+
 
 class List(Command, MirrorSafeCommand):
   common = True
@@ -77,7 +77,7 @@ This is similar to running: repo forall -c 'echo "$REPO_PATH : $REPO_PROJECT"'.
     lines = []
     for project in projects:
       if opt.name_only and not opt.path_only:
-        lines.append("%s" % ( project.name))
+        lines.append("%s" % (project.name))
       elif opt.path_only and not opt.name_only:
         lines.append("%s" % (_getpath(project)))
       else:

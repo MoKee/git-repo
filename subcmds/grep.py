@@ -21,13 +21,15 @@ import sys
 from color import Coloring
 from command import PagedCommand
 from error import GitError
-from git_command import git_require, GitCommand
+from git_command import GitCommand
+
 
 class GrepColoring(Coloring):
   def __init__(self, config):
     Coloring.__init__(self, config, 'grep')
     self.project = self.printer('project', attr='bold')
     self.fail = self.printer('fail', fg='red')
+
 
 class Grep(PagedCommand):
   common = True
@@ -156,12 +158,11 @@ contain a line that matches both expressions:
                  action='callback', callback=carry,
                  help='Show only file names not containing matching lines')
 
-
   def Execute(self, opt, args):
     out = GrepColoring(self.manifest.manifestProject.config)
 
     cmd_argv = ['grep']
-    if out.is_on and git_require((1, 6, 3)):
+    if out.is_on:
       cmd_argv.append('--color')
     cmd_argv.extend(getattr(opt, 'cmd_argv', []))
 

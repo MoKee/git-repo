@@ -27,6 +27,7 @@ pager_process = None
 old_stdout = None
 old_stderr = None
 
+
 def RunPager(globalConfig):
   if not os.isatty(0) or not os.isatty(1):
     return
@@ -35,9 +36,10 @@ def RunPager(globalConfig):
     return
 
   if platform_utils.isWindows():
-    _PipePager(pager);
+    _PipePager(pager)
   else:
     _ForkPager(pager)
+
 
 def TerminatePager():
   global pager_process, old_stdout, old_stderr
@@ -45,12 +47,13 @@ def TerminatePager():
     sys.stdout.flush()
     sys.stderr.flush()
     pager_process.stdin.close()
-    pager_process.wait();
+    pager_process.wait()
     pager_process = None
     # Restore initial stdout/err in case there is more output in this process
     # after shutting down the pager process
     sys.stdout = old_stdout
     sys.stderr = old_stderr
+
 
 def _PipePager(pager):
   global pager_process, old_stdout, old_stderr
@@ -61,6 +64,7 @@ def _PipePager(pager):
   old_stderr = sys.stderr
   sys.stdout = pager_process.stdin
   sys.stderr = pager_process.stdin
+
 
 def _ForkPager(pager):
   global active
@@ -88,6 +92,7 @@ def _ForkPager(pager):
     print("fatal: cannot start pager '%s'" % pager, file=sys.stderr)
     sys.exit(255)
 
+
 def _SelectPager(globalConfig):
   try:
     return os.environ['GIT_PAGER']
@@ -104,6 +109,7 @@ def _SelectPager(globalConfig):
     pass
 
   return 'less'
+
 
 def _BecomePager(pager):
   # Delaying execution of the pager until we have output

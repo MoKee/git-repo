@@ -33,6 +33,7 @@ else:
 
 UNUSUAL_COMMIT_THRESHOLD = 5
 
+
 def _ConfirmManyUploads(multiple_branches=False):
   if multiple_branches:
     print('ATTENTION: One or more branches has an unusually high number '
@@ -44,16 +45,19 @@ def _ConfirmManyUploads(multiple_branches=False):
   answer = input("If you are sure you intend to do this, type 'yes': ").strip()
   return answer == "yes"
 
+
 def _die(fmt, *args):
   msg = fmt % args
   print('error: %s' % msg, file=sys.stderr)
   sys.exit(1)
+
 
 def _SplitEmails(values):
   result = []
   for value in values:
     result.extend([s.strip() for s in value.split(',')])
   return result
+
 
 class Upload(InteractiveCommand):
   common = True
@@ -137,13 +141,13 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                  dest='auto_topic', action='store_true',
                  help='Send local branch name to Gerrit Code Review')
     p.add_option('--re', '--reviewers',
-                 type='string',  action='append', dest='reviewers',
+                 type='string', action='append', dest='reviewers',
                  help='Request reviews from these people.')
     p.add_option('--cc',
-                 type='string',  action='append', dest='cc',
+                 type='string', action='append', dest='cc',
                  help='Also send email to these email addresses.')
     p.add_option('--br',
-                 type='string',  action='store', dest='branch',
+                 type='string', action='store', dest='branch',
                  help='Branch to upload.')
     p.add_option('--cbr', '--current-branch',
                  dest='current_branch', action='store_true',
@@ -168,6 +172,9 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                  type='string', action='store', dest='dest_branch',
                  metavar='BRANCH',
                  help='Submit for review on this target branch.')
+    p.add_option('--no-cert-checks',
+                 dest='validate_certs', action='store_false', default=True,
+                 help='Disable verifying ssl certs (unsafe).')
 
     # Options relating to upload hook.  Note that verify and no-verify are NOT
     # opposites of each other, which is why they store to different locations.
@@ -185,15 +192,16 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
     #   Never run upload hooks, but upload anyway (AKA bypass hooks).
     # - no-verify=True, verify=True:
     #   Invalid
-    p.add_option('--no-cert-checks',
-                 dest='validate_certs', action='store_false', default=True,
-                 help='Disable verifying ssl certs (unsafe).')
-    p.add_option('--no-verify',
+    g = p.add_option_group('Upload hooks')
+    g.add_option('--no-verify',
                  dest='bypass_hooks', action='store_true',
                  help='Do not run the upload hook.')
-    p.add_option('--verify',
+    g.add_option('--verify',
                  dest='allow_all_hooks', action='store_true',
                  help='Run the upload hook without prompting.')
+    g.add_option('--ignore-hooks',
+                 dest='ignore_hooks', action='store_true',
+                 help='Do not abort uploading if upload hooks fail.')
 
   def _SingleBranch(self, opt, branch, people):
     project = branch.project
@@ -214,10 +222,10 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
       print('Upload project %s/ to remote branch %s%s:' %
             (project.relpath, destination, ' (draft)' if opt.draft else ''))
       print('  branch %s (%2d commit%s, %s):' % (
-                    name,
-                    len(commit_list),
-                    len(commit_list) != 1 and 's' or '',
-                    date))
+          name,
+          len(commit_list),
+          len(commit_list) != 1 and 's' or '',
+          date))
       for commit in commit_list:
         print('         %s' % commit)
 
@@ -322,12 +330,12 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
 
     key = 'review.%s.autoreviewer' % project.GetBranch(name).remote.review
     raw_list = project.config.GetString(key)
-    if not raw_list is None:
+    if raw_list is not None:
       people[0].extend([entry.strip() for entry in raw_list.split(',')])
 
     key = 'review.%s.autocopy' % project.GetBranch(name).remote.review
     raw_list = project.config.GetString(key)
-    if not raw_list is None and len(people[0]) > 0:
+    if raw_list is not None and len(people[0]) > 0:
       people[1].extend([entry.strip() for entry in raw_list.split(',')])
 
   def _FindGerritChange(self, branch):
@@ -418,18 +426,18 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
           else:
             fmt = '\n       (%s)'
           print(('[FAILED] %-15s %-15s' + fmt) % (
-                 branch.project.relpath + '/', \
-                 branch.name, \
-                 str(branch.error)),
-                 file=sys.stderr)
+              branch.project.relpath + '/',
+              branch.name,
+              str(branch.error)),
+              file=sys.stderr)
       print()
 
     for branch in todo:
       if branch.uploaded:
         print('[OK    ] %-15s %s' % (
-               branch.project.relpath + '/',
-               branch.name),
-               file=sys.stderr)
+            branch.project.relpath + '/',
+            branch.name),
+            file=sys.stderr)
 
     if have_errors:
       sys.exit(1)
@@ -437,14 +445,14 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
   def _GetMergeBranch(self, project):
     p = GitCommand(project,
                    ['rev-parse', '--abbrev-ref', 'HEAD'],
-                   capture_stdout = True,
-                   capture_stderr = True)
+                   capture_stdout=True,
+                   capture_stderr=True)
     p.Wait()
     local_branch = p.stdout.strip()
     p = GitCommand(project,
                    ['config', '--get', 'branch.%s.merge' % local_branch],
-                   capture_stdout = True,
-                   capture_stderr = True)
+                   capture_stdout=True,
+                   capture_stderr=True)
     p.Wait()
     merge_branch = p.stdout.strip()
     return merge_branch
@@ -488,12 +496,24 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                       abort_if_user_denies=True)
       pending_proj_names = [project.name for (project, available) in pending]
       pending_worktrees = [project.worktree for (project, available) in pending]
+      passed = True
       try:
         hook.Run(opt.allow_all_hooks, project_list=pending_proj_names,
                  worktree_list=pending_worktrees)
+      except SystemExit:
+        passed = False
+        if not opt.ignore_hooks:
+          raise
       except HookError as e:
+        passed = False
         print("ERROR: %s" % str(e), file=sys.stderr)
-        return
+
+      if not passed:
+        if opt.ignore_hooks:
+          print('\nWARNING: pre-upload hooks failed, but uploading anyways.',
+                file=sys.stderr)
+        else:
+          return
 
     if opt.reviewers:
       reviewers = _SplitEmails(opt.reviewers)

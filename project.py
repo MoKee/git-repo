@@ -85,6 +85,7 @@ def not_rev(r):
 def sq(r):
   return "'" + r.replace("'", "'\''") + "'"
 
+
 _project_hook_list = None
 
 
@@ -1256,9 +1257,7 @@ class Project(object):
       print(line[:-1])
     return p.Wait() == 0
 
-
 # Publish / Upload ##
-
   def WasPublished(self, branch, all_refs=None):
     """Was the branch published (uploaded) for code review?
        If so, returns the SHA-1 hash of the last published
@@ -1410,9 +1409,7 @@ class Project(object):
                             R_HEADS + branch.name,
                             message=msg)
 
-
 # Sync ##
-
   def _ExtractArchive(self, tarpath, path=None):
     """Extract the given tar on its current location
 
@@ -1819,9 +1816,7 @@ class Project(object):
                             patch_id,
                             self.bare_git.rev_parse('FETCH_HEAD'))
 
-
 # Branch Management ##
-
   def GetHeadPath(self):
     """Return the full path to the HEAD ref."""
     dotgit = os.path.join(self.worktree, '.git')
@@ -2019,9 +2014,7 @@ class Project(object):
         kept.append(ReviewableBranch(self, branch, base))
     return kept
 
-
 # Submodule Management ##
-
   def GetRegisteredSubprojects(self):
     result = []
 
@@ -2171,7 +2164,6 @@ class Project(object):
       result.append(subproject)
       result.extend(subproject.GetDerivedSubprojects())
     return result
-
 
 # Direct Git Commands ##
   def _CheckForImmutableRevision(self):
@@ -2341,7 +2333,7 @@ class Project(object):
     else:
       branch = self.revisionExpr
     if (not self.manifest.IsMirror and is_sha1 and depth
-        and git_require((1, 8, 3))):
+            and git_require((1, 8, 3))):
       # Shallow checkout of a specific commit, fetch from that commit and not
       # the heads only as the commit might be deeper in the history.
       spec.append(branch)
@@ -2627,7 +2619,7 @@ class Project(object):
                                                   (self.worktree)):
                 platform_utils.rmtree(platform_utils.realpath(self.worktree))
               return self._InitGitDir(mirror_git=mirror_git, force_sync=False)
-            except:
+            except Exception:
               raise e
           raise e
 
@@ -2782,9 +2774,31 @@ class Project(object):
       symlink_dirs += self.working_tree_dirs
     to_symlink = symlink_files + symlink_dirs
     for name in set(to_symlink):
-      dst = platform_utils.realpath(os.path.join(destdir, name))
+      # Try to self-heal a bit in simple cases.
+      dst_path = os.path.join(destdir, name)
+      src_path = os.path.join(srcdir, name)
+
+      if name in self.working_tree_dirs:
+        # If the dir is missing under .repo/projects/, create it.
+        if not os.path.exists(src_path):
+          os.makedirs(src_path)
+
+      elif name in self.working_tree_files:
+        # If it's a file under the checkout .git/ and the .repo/projects/ has
+        # nothing, move the file under the .repo/projects/ tree.
+        if not os.path.exists(src_path) and os.path.isfile(dst_path):
+          platform_utils.rename(dst_path, src_path)
+
+      # If the path exists under the .repo/projects/ and there's no symlink
+      # under the checkout .git/, recreate the symlink.
+      if name in self.working_tree_dirs or name in self.working_tree_files:
+        if os.path.exists(src_path) and not os.path.exists(dst_path):
+          platform_utils.symlink(
+              os.path.relpath(src_path, os.path.dirname(dst_path)), dst_path)
+
+      dst = platform_utils.realpath(dst_path)
       if os.path.lexists(dst):
-        src = platform_utils.realpath(os.path.join(srcdir, name))
+        src = platform_utils.realpath(src_path)
         # Fail if the links are pointing to the wrong place
         if src != dst:
           _error('%s is different in %s vs %s', name, destdir, srcdir)
@@ -2872,7 +2886,7 @@ class Project(object):
         try:
           platform_utils.rmtree(dotgit)
           return self._InitWorkTree(force_sync=False, submodules=submodules)
-        except:
+        except Exception:
           raise e
       raise e
 
@@ -3133,9 +3147,6 @@ class Project(object):
           raise TypeError('%s() got an unexpected keyword argument %r'
                           % (name, k))
         if config is not None:
-          if not git_require((1, 7, 2)):
-            raise ValueError('cannot set config on command line for %s()'
-                             % name)
           for k, v in config.items():
             cmdv.append('-c')
             cmdv.append('%s=%s' % (k, v))

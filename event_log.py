@@ -23,6 +23,7 @@ TASK_COMMAND = 'command'
 TASK_SYNC_NETWORK = 'sync-network'
 TASK_SYNC_LOCAL = 'sync-local'
 
+
 class EventLog(object):
   """Event log that records events that occurred during a repo invocation.
 
@@ -138,7 +139,7 @@ class EventLog(object):
     Returns:
       A dictionary of the event added to the log.
     """
-    event['status'] =  self.GetStatusString(success)
+    event['status'] = self.GetStatusString(success)
     event['finish_time'] = finish
     return event
 
@@ -164,6 +165,7 @@ class EventLog(object):
 
 # An integer id that is unique across this invocation of the program.
 _EVENT_ID = multiprocessing.Value('i', 1)
+
 
 def _NextEventId():
   """Helper function for grabbing the next unique id.

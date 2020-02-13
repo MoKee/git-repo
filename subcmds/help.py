@@ -23,6 +23,7 @@ from color import Coloring
 from command import PagedCommand, MirrorSafeCommand, GitcAvailableCommand, GitcClientCommand
 import gitc_utils
 
+
 class Help(PagedCommand, MirrorSafeCommand):
   common = False
   helpSummary = "Display detailed help on a command"
@@ -72,13 +73,13 @@ Displays detailed usage information about a command.
       return False
 
     commandNames = list(sorted([name
-                    for name, command in self.commands.items()
-                    if command.common and gitc_supported(command)]))
+                                for name, command in self.commands.items()
+                                if command.common and gitc_supported(command)]))
     self._PrintCommands(commandNames)
 
     print(
-"See 'repo help <command>' for more information on a specific command.\n"
-"See 'repo help --all' for a complete list of recognized commands.")
+        "See 'repo help <command>' for more information on a specific command.\n"
+        "See 'repo help --all' for a complete list of recognized commands.")
 
   def _PrintCommandHelp(self, cmd, header_prefix=''):
     class _Out(Coloring):

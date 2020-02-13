@@ -163,7 +163,7 @@ class CopyLinkTestCase(unittest.TestCase):
 
   @staticmethod
   def touch(path):
-    with open(path, 'w') as f:
+    with open(path, 'w'):
       pass
 
   def assertExists(self, path, msg=None):
@@ -256,7 +256,7 @@ class CopyFile(CopyLinkTestCase):
     cf = self.CopyFile('bar/foo.txt', 'foo')
     self.assertRaises(error.ManifestInvalidPathError, cf._Copy)
 
-  def test_src_block_dir(self):
+  def test_src_block_copy_from_dir(self):
     """Do not allow copying from a directory."""
     src = os.path.join(self.worktree, 'dir')
     os.makedirs(src)
@@ -279,7 +279,7 @@ class CopyFile(CopyLinkTestCase):
     cf = self.CopyFile('foo.txt', 'sym/foo.txt')
     self.assertRaises(error.ManifestInvalidPathError, cf._Copy)
 
-  def test_src_block_dir(self):
+  def test_src_block_copy_to_dir(self):
     """Do not allow copying to a directory."""
     src = os.path.join(self.worktree, 'foo.txt')
     self.touch(src)

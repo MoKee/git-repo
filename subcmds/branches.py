@@ -19,12 +19,14 @@ import sys
 from color import Coloring
 from command import Command
 
+
 class BranchColoring(Coloring):
   def __init__(self, config):
     Coloring.__init__(self, config, 'branch')
     self.current = self.printer('current', fg='green')
-    self.local   = self.printer('local')
+    self.local = self.printer('local')
     self.notinproject = self.printer('notinproject', fg='red')
+
 
 class BranchInfo(object):
   def __init__(self, name):
@@ -158,7 +160,7 @@ is shown, then the branch appears in all projects.
           for b in i.projects:
             have.add(b.project)
           for p in projects:
-            if not p in have:
+            if p not in have:
               paths.append(p.relpath)
 
         s = ' %s %s' % (in_type, ', '.join(paths))
@@ -170,11 +172,11 @@ is shown, then the branch appears in all projects.
           fmt = out.current if i.IsCurrent else out.write
           for p in paths:
             out.nl()
-            fmt(width*' ' + '          %s' % p)
+            fmt(width * ' ' + '          %s' % p)
           fmt = out.write
           for p in non_cur_paths:
             out.nl()
-            fmt(width*' ' + '          %s' % p)
+            fmt(width * ' ' + '          %s' % p)
       else:
         out.write(' in all projects')
       out.nl()

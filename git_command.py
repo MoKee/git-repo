@@ -48,6 +48,7 @@ _ssh_proxy_path = None
 _ssh_sock_path = None
 _ssh_clients = []
 
+
 def ssh_sock(create=True):
   global _ssh_sock_path
   if _ssh_sock_path is None:
@@ -57,26 +58,30 @@ def ssh_sock(create=True):
     if not os.path.exists(tmp_dir):
       tmp_dir = tempfile.gettempdir()
     _ssh_sock_path = os.path.join(
-      tempfile.mkdtemp('', 'ssh-', tmp_dir),
-      'master-%r@%h:%p')
+        tempfile.mkdtemp('', 'ssh-', tmp_dir),
+        'master-%r@%h:%p')
   return _ssh_sock_path
+
 
 def _ssh_proxy():
   global _ssh_proxy_path
   if _ssh_proxy_path is None:
     _ssh_proxy_path = os.path.join(
-      os.path.dirname(__file__),
-      'git_ssh')
+        os.path.dirname(__file__),
+        'git_ssh')
   return _ssh_proxy_path
+
 
 def _add_ssh_client(p):
   _ssh_clients.append(p)
+
 
 def _remove_ssh_client(p):
   try:
     _ssh_clients.remove(p)
   except ValueError:
     pass
+
 
 def terminate_ssh_clients():
   global _ssh_clients
@@ -88,7 +93,9 @@ def terminate_ssh_clients():
       pass
   _ssh_clients = []
 
+
 _git_version = None
+
 
 class _GitCall(object):
   def version_tuple(self):
@@ -101,12 +108,15 @@ class _GitCall(object):
     return _git_version
 
   def __getattr__(self, name):
-    name = name.replace('_','-')
+    name = name.replace('_', '-')
+
     def fun(*cmdv):
       command = [name]
       command.extend(cmdv)
       return GitCommand(None, command).Wait() == 0
     return fun
+
+
 git = _GitCall()
 
 
@@ -187,7 +197,9 @@ class UserAgent(object):
 
     return self._git_ua
 
+
 user_agent = UserAgent()
+
 
 def git_require(min_version, fail=False, msg=''):
   git_version = git.version_tuple()
@@ -201,21 +213,23 @@ def git_require(min_version, fail=False, msg=''):
     sys.exit(1)
   return False
 
+
 def _setenv(env, name, value):
   env[name] = value.encode()
+
 
 class GitCommand(object):
   def __init__(self,
                project,
                cmdv,
-               bare = False,
-               provide_stdin = False,
-               capture_stdout = False,
-               capture_stderr = False,
-               disable_editor = False,
-               ssh_proxy = False,
-               cwd = None,
-               gitdir = None):
+               bare=False,
+               provide_stdin=False,
+               capture_stdout=False,
+               capture_stderr=False,
+               disable_editor=False,
+               ssh_proxy=False,
+               cwd=None,
+               gitdir=None):
     env = self._GetBasicEnv()
 
     # If we are not capturing std* then need to print it.
@@ -295,11 +309,11 @@ class GitCommand(object):
 
     try:
       p = subprocess.Popen(command,
-                           cwd = cwd,
-                           env = env,
-                           stdin = stdin,
-                           stdout = stdout,
-                           stderr = stderr)
+                           cwd=cwd,
+                           env=env,
+                           stdin=stdin,
+                           stdout=stdout,
+                           stderr=stderr)
     except Exception as e:
       raise GitError('%s: %s' % (command[1], e))
 

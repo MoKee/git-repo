@@ -47,7 +47,7 @@ except ImportError:
 from color import SetDefaultColoring
 import event_log
 from repo_trace import SetTrace
-from git_command import git, GitCommand, user_agent
+from git_command import user_agent
 from git_config import init_ssh, close_ssh
 from command import InteractiveCommand
 from command import MirrorSafeCommand
@@ -100,6 +100,7 @@ global_options.add_option('--version',
 global_options.add_option('--event-log',
                           dest='event_log', action='store',
                           help='filename of event log to append timeline to')
+
 
 class _Repo(object):
   def __init__(self, repodir):
@@ -188,7 +189,7 @@ class _Repo(object):
       copts = cmd.ReadEnvironmentOptions(copts)
     except NoManifestException as e:
       print('error: in `%s`: %s' % (' '.join([name] + argv), str(e)),
-        file=sys.stderr)
+            file=sys.stderr)
       print('error: manifest missing or unreadable -- please run init',
             file=sys.stderr)
       return 1
@@ -211,9 +212,9 @@ class _Repo(object):
       cmd.ValidateOptions(copts, cargs)
       result = cmd.Execute(copts, cargs)
     except (DownloadError, ManifestInvalidRevisionError,
-        NoManifestException) as e:
+            NoManifestException) as e:
       print('error: in `%s`: %s' % (' '.join([name] + argv), str(e)),
-        file=sys.stderr)
+            file=sys.stderr)
       if isinstance(e, NoManifestException):
         print('error: manifest missing or unreadable -- please run init',
               file=sys.stderr)
@@ -300,10 +301,12 @@ repo: error:
     cp %s %s
 """ % (exp_str, WrapperPath(), repo_path), file=sys.stderr)
 
+
 def _CheckRepoDir(repo_dir):
   if not repo_dir:
     print('no --repo-dir argument', file=sys.stderr)
     sys.exit(1)
+
 
 def _PruneOptions(argv, opt):
   i = 0
@@ -320,6 +323,7 @@ def _PruneOptions(argv, opt):
       continue
     i += 1
 
+
 class _UserAgentHandler(urllib.request.BaseHandler):
   def http_request(self, req):
     req.add_header('User-Agent', user_agent.repo)
@@ -328,6 +332,7 @@ class _UserAgentHandler(urllib.request.BaseHandler):
   def https_request(self, req):
     req.add_header('User-Agent', user_agent.repo)
     return req
+
 
 def _AddPasswordFromUserInput(handler, msg, req):
   # If repo could not find auth info from netrc, try to get it from user input
@@ -342,51 +347,56 @@ def _AddPasswordFromUserInput(handler, msg, req):
       return
     handler.passwd.add_password(None, url, user, password)
 
+
 class _BasicAuthHandler(urllib.request.HTTPBasicAuthHandler):
   def http_error_401(self, req, fp, code, msg, headers):
     _AddPasswordFromUserInput(self, msg, req)
     return urllib.request.HTTPBasicAuthHandler.http_error_401(
-      self, req, fp, code, msg, headers)
+        self, req, fp, code, msg, headers)
 
   def http_error_auth_reqed(self, authreq, host, req, headers):
     try:
       old_add_header = req.add_header
+
       def _add_header(name, val):
         val = val.replace('\n', '')
         old_add_header(name, val)
       req.add_header = _add_header
       return urllib.request.AbstractBasicAuthHandler.http_error_auth_reqed(
-        self, authreq, host, req, headers)
-    except:
+          self, authreq, host, req, headers)
+    except Exception:
       reset = getattr(self, 'reset_retry_count', None)
       if reset is not None:
         reset()
       elif getattr(self, 'retried', None):
         self.retried = 0
       raise
+
 
 class _DigestAuthHandler(urllib.request.HTTPDigestAuthHandler):
   def http_error_401(self, req, fp, code, msg, headers):
     _AddPasswordFromUserInput(self, msg, req)
     return urllib.request.HTTPDigestAuthHandler.http_error_401(
-      self, req, fp, code, msg, headers)
+        self, req, fp, code, msg, headers)
 
   def http_error_auth_reqed(self, auth_header, host, req, headers):
     try:
       old_add_header = req.add_header
+
       def _add_header(name, val):
         val = val.replace('\n', '')
         old_add_header(name, val)
       req.add_header = _add_header
       return urllib.request.AbstractDigestAuthHandler.http_error_auth_reqed(
-        self, auth_header, host, req, headers)
-    except:
+          self, auth_header, host, req, headers)
+    except Exception:
       reset = getattr(self, 'reset_retry_count', None)
       if reset is not None:
         reset()
       elif getattr(self, 'retried', None):
         self.retried = 0
       raise
+
 
 class _KerberosAuthHandler(urllib.request.BaseHandler):
   def __init__(self):
@@ -406,7 +416,7 @@ class _KerberosAuthHandler(urllib.request.BaseHandler):
 
       if self.retried > 3:
         raise urllib.request.HTTPError(req.get_full_url(), 401,
-          "Negotiate auth failed", headers, None)
+                                       "Negotiate auth failed", headers, None)
       else:
         self.retried += 1
 
@@ -422,7 +432,7 @@ class _KerberosAuthHandler(urllib.request.BaseHandler):
         return response
     except kerberos.GSSError:
       return None
-    except:
+    except Exception:
       self.reset_retry_count()
       raise
     finally:
@@ -468,6 +478,7 @@ class _KerberosAuthHandler(urllib.request.BaseHandler):
       kerberos.authGSSClientClean(self.context)
       self.context = None
 
+
 def init_http():
   handlers = [_UserAgentHandler()]
 
@@ -476,7 +487,7 @@ def init_http():
     n = netrc.netrc()
     for host in n.hosts:
       p = n.hosts[host]
-      mgr.add_password(p[1], 'http://%s/'  % host, p[0], p[2])
+      mgr.add_password(p[1], 'http://%s/' % host, p[0], p[2])
       mgr.add_password(p[1], 'https://%s/' % host, p[0], p[2])
   except netrc.NetrcParseError:
     pass
@@ -494,6 +505,7 @@ def init_http():
     handlers.append(urllib.request.HTTPHandler(debuglevel=1))
     handlers.append(urllib.request.HTTPSHandler(debuglevel=1))
   urllib.request.install_opener(urllib.request.build_opener(*handlers))
+
 
 def _Main(argv):
   result = 0
@@ -550,6 +562,7 @@ def _Main(argv):
 
   TerminatePager()
   sys.exit(result)
+
 
 if __name__ == '__main__':
   _Main(sys.argv[1:])

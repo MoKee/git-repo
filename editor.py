@@ -24,6 +24,7 @@ import tempfile
 from error import EditorError
 import platform_utils
 
+
 class Editor(object):
   """Manages the user's preferred text editor."""
 
@@ -57,7 +58,7 @@ class Editor(object):
 
     if os.getenv('TERM') == 'dumb':
       print(
-"""No editor specified in GIT_EDITOR, core.editor, VISUAL or EDITOR.
+          """No editor specified in GIT_EDITOR, core.editor, VISUAL or EDITOR.
 Tried to fall back to vi but terminal is dumb.  Please configure at
 least one of these before using this command.""", file=sys.stderr)
       sys.exit(1)
@@ -104,10 +105,10 @@ least one of these before using this command.""", file=sys.stderr)
         rc = subprocess.Popen(args, shell=shell).wait()
       except OSError as e:
         raise EditorError('editor failed, %s: %s %s'
-          % (str(e), editor, path))
+                          % (str(e), editor, path))
       if rc != 0:
         raise EditorError('editor failed with exit status %d: %s %s'
-          % (rc, editor, path))
+                          % (rc, editor, path))
 
       with open(path, mode='rb') as fd2:
         return fd2.read().decode('utf-8')
