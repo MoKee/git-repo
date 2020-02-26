@@ -15,6 +15,8 @@
 # limitations under the License.
 
 from __future__ import print_function
+
+import optparse
 import os
 import platform
 import re
@@ -85,9 +87,12 @@ to update the working directory files.
   def _Options(self, p, gitc_init=False):
     # Logging
     g = p.add_option_group('Logging options')
+    g.add_option('-v', '--verbose',
+                 dest='output_mode', action='store_true',
+                 help='show all output')
     g.add_option('-q', '--quiet',
-                 dest="quiet", action="store_true", default=False,
-                 help="be quiet")
+                 dest='output_mode', action='store_false',
+                 help='only show errors')
 
     # Manifest
     g = p.add_option_group('Manifest options')
@@ -128,6 +133,10 @@ to update the working directory files.
     g.add_option('--clone-filter', action='store', default='blob:none',
                  dest='clone_filter',
                  help='filter for use with --partial-clone [default: %default]')
+    # TODO(vapier): Expose option with real help text once this has been in the
+    # wild for a while w/out significant bug reports.  Goal is by ~Sep 2020.
+    g.add_option('--worktree', action='store_true',
+                 help=optparse.SUPPRESS_HELP)
     g.add_option('--archive',
                  dest='archive', action='store_true',
                  help='checkout an archive instead of a git repository for '
@@ -146,10 +155,10 @@ to update the working directory files.
                       'platform group [auto|all|none|linux|darwin|...]',
                  metavar='PLATFORM')
     g.add_option('--no-clone-bundle',
-                 dest='no_clone_bundle', action='store_true',
+                 dest='clone_bundle', default=True, action='store_false',
                  help='disable use of /clone.bundle on HTTP/HTTPS')
     g.add_option('--no-tags',
-                 dest='no_tags', action='store_true',
+                 dest='tags', default=True, action='store_false',
                  help="don't fetch tags in the manifest")
 
     # Tool
@@ -161,7 +170,7 @@ to update the working directory files.
                  dest='repo_branch',
                  help='repo branch or revision', metavar='REVISION')
     g.add_option('--no-repo-verify',
-                 dest='no_repo_verify', action='store_true',
+                 dest='repo_verify', default=True, action='store_false',
                  help='do not verify repo source code')
 
     # Other
@@ -184,7 +193,8 @@ to update the working directory files.
         sys.exit(1)
 
       if not opt.quiet:
-        print('Get %s' % GitConfig.ForUser().UrlInsteadOf(opt.manifest_url),
+        print('Downloading manifest from %s' %
+              (GitConfig.ForUser().UrlInsteadOf(opt.manifest_url),),
               file=sys.stderr)
 
       # The manifest project object doesn't keep track of the path on the
@@ -246,6 +256,20 @@ to update the working directory files.
     if opt.dissociate:
       m.config.SetString('repo.dissociate', 'true')
 
+    if opt.worktree:
+      if opt.mirror:
+        print('fatal: --mirror and --worktree are incompatible',
+              file=sys.stderr)
+        sys.exit(1)
+      if opt.submodules:
+        print('fatal: --submodules and --worktree are incompatible',
+              file=sys.stderr)
+        sys.exit(1)
+      m.config.SetString('repo.worktree', 'true')
+      if is_new:
+        m.use_git_worktrees = True
+      print('warning: --worktree is experimental!', file=sys.stderr)
+
     if opt.archive:
       if is_new:
         m.config.SetString('repo.archive', 'true')
@@ -280,10 +304,10 @@ to update the working directory files.
     if opt.submodules:
       m.config.SetString('repo.submodules', 'true')
 
-    if not m.Sync_NetworkHalf(is_new=is_new, quiet=opt.quiet,
-                              clone_bundle=not opt.no_clone_bundle,
+    if not m.Sync_NetworkHalf(is_new=is_new, quiet=opt.quiet, verbose=opt.verbose,
+                              clone_bundle=opt.clone_bundle,
                               current_branch_only=opt.current_branch_only,
-                              no_tags=opt.no_tags, submodules=opt.submodules,
+                              tags=opt.tags, submodules=opt.submodules,
                               clone_filter=opt.clone_filter):
       r = m.GetRemote(m.remote.name)
       print('fatal: cannot obtain manifest %s' % r.url, file=sys.stderr)
@@ -327,7 +351,7 @@ to update the working directory files.
       return value
     return a
 
-  def _ShouldConfigureUser(self):
+  def _ShouldConfigureUser(self, opt):
     gc = self.manifest.globalConfig
     mp = self.manifest.manifestProject
 
@@ -339,21 +363,24 @@ to update the working directory files.
       mp.config.SetString('user.name', gc.GetString('user.name'))
       mp.config.SetString('user.email', gc.GetString('user.email'))
 
-    print()
-    print('Your identity is: %s <%s>' % (mp.config.GetString('user.name'),
-                                         mp.config.GetString('user.email')))
-    print('If you want to change this, please re-run \'repo init\' with --config-name')
+    if not opt.quiet:
+      print()
+      print('Your identity is: %s <%s>' % (mp.config.GetString('user.name'),
+                                           mp.config.GetString('user.email')))
+      print("If you want to change this, please re-run 'repo init' with --config-name")
     return False
 
-  def _ConfigureUser(self):
+  def _ConfigureUser(self, opt):
     mp = self.manifest.manifestProject
 
     while True:
-      print()
+      if not opt.quiet:
+        print()
       name = self._Prompt('Your Name', mp.UserName)
       email = self._Prompt('Your Email', mp.UserEmail)
 
-      print()
+      if not opt.quiet:
+        print()
       print('Your identity is: %s <%s>' % (name, email))
       print('is this correct [y/N]? ', end='')
       # TODO: When we require Python 3, use flush=True w/print above.
@@ -425,15 +452,16 @@ to update the working directory files.
       # We store the depth in the main manifest project.
       self.manifest.manifestProject.config.SetString('repo.depth', depth)
 
-  def _DisplayResult(self):
+  def _DisplayResult(self, opt):
     if self.manifest.IsMirror:
       init_type = 'mirror '
     else:
       init_type = ''
 
-    print()
-    print('repo %shas been initialized in %s'
-          % (init_type, self.manifest.topdir))
+    if not opt.quiet:
+      print()
+      print('repo %shas been initialized in %s' %
+            (init_type, self.manifest.topdir))
 
     current_dir = os.getcwd()
     if current_dir != self.manifest.topdir:
@@ -459,12 +487,19 @@ to update the working directory files.
             % ('.'.join(str(x) for x in MIN_GIT_VERSION_SOFT),),
             file=sys.stderr)
 
+    opt.quiet = opt.output_mode is False
+    opt.verbose = opt.output_mode is True
+
+    if opt.worktree:
+      # Older versions of git supported worktree, but had dangerous gc bugs.
+      git_require((2, 15, 0), fail=True, msg='git gc worktree corruption')
+
     self._SyncManifest(opt)
     self._LinkManifest(opt.manifest_name)
 
     if os.isatty(0) and os.isatty(1) and not self.manifest.IsMirror:
-      if opt.config_name or self._ShouldConfigureUser():
-        self._ConfigureUser()
+      if opt.config_name or self._ShouldConfigureUser(opt):
+        self._ConfigureUser(opt)
       self._ConfigureColor()
 
-    self._DisplayResult()
+    self._DisplayResult(opt)

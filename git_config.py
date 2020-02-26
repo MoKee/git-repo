@@ -21,6 +21,7 @@ import errno
 import json
 import os
 import re
+import signal
 import ssl
 import subprocess
 import sys
@@ -41,7 +42,6 @@ else:
   urllib.request = urllib2
   urllib.error = urllib2
 
-from signal import SIGTERM
 from error import GitError, UploadError
 import platform_utils
 from repo_trace import Trace
@@ -88,10 +88,12 @@ def _key(name):
 class GitConfig(object):
   _ForUser = None
 
+  _USER_CONFIG = '~/.gitconfig'
+
   @classmethod
   def ForUser(cls):
     if cls._ForUser is None:
-      cls._ForUser = cls(configfile=os.path.expanduser('~/.gitconfig'))
+      cls._ForUser = cls(configfile=os.path.expanduser(cls._USER_CONFIG))
     return cls._ForUser
 
   @classmethod
@@ -121,6 +123,43 @@ class GitConfig(object):
     if include_defaults and self.defaults:
       return self.defaults.Has(name, include_defaults=True)
     return False
+
+  def GetInt(self, name):
+    """Returns an integer from the configuration file.
+
+    This follows the git config syntax.
+
+    Args:
+      name: The key to lookup.
+
+    Returns:
+      None if the value was not defined, or is not a boolean.
+      Otherwise, the number itself.
+    """
+    v = self.GetString(name)
+    if v is None:
+      return None
+    v = v.strip()
+
+    mult = 1
+    if v.endswith('k'):
+      v = v[:-1]
+      mult = 1024
+    elif v.endswith('m'):
+      v = v[:-1]
+      mult = 1024 * 1024
+    elif v.endswith('g'):
+      v = v[:-1]
+      mult = 1024 * 1024 * 1024
+
+    base = 10
+    if v.startswith('0x'):
+      base = 16
+
+    try:
+      return int(v, base=base) * mult
+    except ValueError:
+      return None
 
   def GetBoolean(self, name):
     """Returns a boolean from the configuration file.
@@ -336,6 +375,12 @@ class GitConfig(object):
       GitError('git config %s: %s' % (str(args), p.stderr))
 
 
+class RepoConfig(GitConfig):
+  """User settings for repo itself."""
+
+  _USER_CONFIG = '~/.repoconfig/config'
+
+
 class RefSpec(object):
   """A Git refspec line, split into its components:
 
@@ -494,7 +539,7 @@ def close_ssh():
 
   for p in _master_processes:
     try:
-      os.kill(p.pid, SIGTERM)
+      os.kill(p.pid, signal.SIGTERM)
       p.wait()
     except OSError:
       pass

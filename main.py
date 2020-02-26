@@ -26,6 +26,7 @@ import getpass
 import netrc
 import optparse
 import os
+import shlex
 import sys
 import textwrap
 import time
@@ -48,7 +49,7 @@ from color import SetDefaultColoring
 import event_log
 from repo_trace import SetTrace
 from git_command import user_agent
-from git_config import init_ssh, close_ssh
+from git_config import init_ssh, close_ssh, RepoConfig
 from command import InteractiveCommand
 from command import MirrorSafeCommand
 from command import GitcAvailableCommand, GitcClientCommand
@@ -69,7 +70,35 @@ from wrapper import WrapperPath, Wrapper
 from subcmds import all_commands
 
 if not is_python3():
-  input = raw_input
+  input = raw_input  # noqa: F821
+
+# NB: These do not need to be kept in sync with the repo launcher script.
+# These may be much newer as it allows the repo launcher to roll between
+# different repo releases while source versions might require a newer python.
+#
+# The soft version is when we start warning users that the version is old and
+# we'll be dropping support for it.  We'll refuse to work with versions older
+# than the hard version.
+#
+# python-3.6 is in Ubuntu Bionic.
+MIN_PYTHON_VERSION_SOFT = (3, 6)
+MIN_PYTHON_VERSION_HARD = (3, 4)
+
+if sys.version_info.major < 3:
+  print('repo: warning: Python 2 is no longer supported; '
+        'Please upgrade to Python {}.{}+.'.format(*MIN_PYTHON_VERSION_SOFT),
+        file=sys.stderr)
+else:
+  if sys.version_info < MIN_PYTHON_VERSION_HARD:
+    print('repo: error: Python 3 version is too old; '
+          'Please upgrade to Python {}.{}+.'.format(*MIN_PYTHON_VERSION_SOFT),
+          file=sys.stderr)
+    sys.exit(1)
+  elif sys.version_info < MIN_PYTHON_VERSION_SOFT:
+    print('repo: warning: your Python 3 version is no longer supported; '
+          'Please upgrade to Python {}.{}+.'.format(*MIN_PYTHON_VERSION_SOFT),
+          file=sys.stderr)
+
 
 global_options = optparse.OptionParser(
     usage='repo [-p|--paginate|--no-pager] COMMAND [ARGS]',
@@ -80,7 +109,7 @@ global_options.add_option('-p', '--paginate',
                           dest='pager', action='store_true',
                           help='display command output in the pager')
 global_options.add_option('--no-pager',
-                          dest='no_pager', action='store_true',
+                          dest='pager', action='store_false',
                           help='disable the pager')
 global_options.add_option('--color',
                           choices=('auto', 'always', 'never'), default=None,
@@ -127,6 +156,9 @@ class _Repo(object):
       argv = []
     gopts, _gargs = global_options.parse_args(glob)
 
+    name, alias_args = self._ExpandAlias(name)
+    argv = alias_args + argv
+
     if gopts.help:
       global_options.print_help()
       commands = ' '.join(sorted(self.commands))
@@ -136,6 +168,27 @@ class _Repo(object):
       global_options.exit()
 
     return (name, gopts, argv)
+
+  def _ExpandAlias(self, name):
+    """Look up user registered aliases."""
+    # We don't resolve aliases for existing subcommands.  This matches git.
+    if name in self.commands:
+      return name, []
+
+    key = 'alias.%s' % (name,)
+    alias = RepoConfig.ForRepository(self.repodir).GetString(key)
+    if alias is None:
+      alias = RepoConfig.ForUser().GetString(key)
+    if alias is None:
+      return name, []
+
+    args = alias.strip().split(' ', 1)
+    name = args[0]
+    if len(args) == 2:
+      args = shlex.split(args[1])
+    else:
+      args = []
+    return name, args
 
   def _Run(self, name, gopts, argv):
     """Execute the requested subcommand."""
@@ -194,7 +247,7 @@ class _Repo(object):
             file=sys.stderr)
       return 1
 
-    if not gopts.no_pager and not isinstance(cmd, InteractiveCommand):
+    if gopts.pager is not False and not isinstance(cmd, InteractiveCommand):
       config = cmd.manifest.globalConfig
       if gopts.pager:
         use_pager = True
@@ -229,7 +282,8 @@ class _Repo(object):
       if e.name:
         print('error: project group must be enabled for project %s' % e.name, file=sys.stderr)
       else:
-        print('error: project group must be enabled for the project in the current directory', file=sys.stderr)
+        print('error: project group must be enabled for the project in the current directory',
+              file=sys.stderr)
       result = 1
     except SystemExit as e:
       if e.code:
@@ -286,7 +340,7 @@ def _CheckWrapperVersion(ver_str, repo_path):
 repo: error:
 !!! Your version of repo %s is too old.
 !!! We need at least version %s.
-!!! A new repo command (%s) is available.
+!!! A new version of repo (%s) is available.
 !!! You must upgrade before you can continue:
 
     cp %s %s
@@ -295,7 +349,7 @@ repo: error:
 
   if exp > ver:
     print("""
-... A new repo command (%5s) is available.
+... A new version of repo (%s) is available.
 ... You should upgrade soon:
 
     cp %s %s

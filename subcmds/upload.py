@@ -27,7 +27,7 @@ from project import RepoHook
 
 from pyversion import is_python3
 if not is_python3():
-  input = raw_input
+  input = raw_input  # noqa: F821
 else:
   unicode = str
 
@@ -130,6 +130,12 @@ is set to "true" then repo will assume you always want the equivalent
 of the -t option to the repo command. If unset or set to "false" then
 repo will make use of only the command line option.
 
+review.URL.uploadhashtags:
+
+To add hashtags whenever uploading a commit, you can set a per-project
+or global Git option to do so. The value of review.URL.uploadhashtags
+will be used as comma delimited hashtags like the --hashtags option.
+
 # References
 
 Gerrit Code Review:  https://www.gerritcodereview.com/
@@ -140,6 +146,12 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
     p.add_option('-t',
                  dest='auto_topic', action='store_true',
                  help='Send local branch name to Gerrit Code Review')
+    p.add_option('--hashtag', '--ht',
+                 dest='hashtags', action='append', default=[],
+                 help='Add hashtags (comma delimited) to the review.')
+    p.add_option('--hashtag-branch', '--htb',
+                 action='store_true',
+                 help='Add local branch name as a hashtag.')
     p.add_option('--re', '--reviewers',
                  type='string', action='append', dest='reviewers',
                  help='Request reviews from these people.')
@@ -172,6 +184,12 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                  type='string', action='store', dest='dest_branch',
                  metavar='BRANCH',
                  help='Submit for review on this target branch.')
+    p.add_option('-n', '--dry-run',
+                 dest='dryrun', default=False, action='store_true',
+                 help='Do everything except actually upload the CL.')
+    p.add_option('-y', '--yes',
+                 default=False, action='store_true',
+                 help='Answer yes to all safe prompts.')
     p.add_option('--no-cert-checks',
                  dest='validate_certs', action='store_false', default=True,
                  help='Disable verifying ssl certs (unsafe).')
@@ -232,8 +250,12 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
       print('to %s (y/N)? ' % remote.review, end='')
       # TODO: When we require Python 3, use flush=True w/print above.
       sys.stdout.flush()
-      answer = sys.stdin.readline().strip().lower()
-      answer = answer in ('y', 'yes', '1', 'true', 't')
+      if opt.yes:
+        print('<--yes>')
+        answer = True
+      else:
+        answer = sys.stdin.readline().strip().lower()
+        answer = answer in ('y', 'yes', '1', 'true', 't')
 
     if answer:
       if len(branch.commits) > UNUSUAL_COMMIT_THRESHOLD:
@@ -372,7 +394,11 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             print('Continue uploading? (y/N) ', end='')
             # TODO: When we require Python 3, use flush=True w/print above.
             sys.stdout.flush()
-            a = sys.stdin.readline().strip().lower()
+            if opt.yes:
+              print('<--yes>')
+              a = 'yes'
+            else:
+              a = sys.stdin.readline().strip().lower()
             if a not in ('y', 'yes', 't', 'true', 'on'):
               print("skipping upload", file=sys.stderr)
               branch.uploaded = False
@@ -383,6 +409,22 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         if opt.auto_topic is not True:
           key = 'review.%s.uploadtopic' % branch.project.remote.review
           opt.auto_topic = branch.project.config.GetBoolean(key)
+
+        # Check if hashtags should be included.
+        def _ExpandHashtag(value):
+          """Split |value| up into comma delimited tags."""
+          if not value:
+            return
+          for tag in value.split(','):
+            tag = tag.strip()
+            if tag:
+              yield tag
+        key = 'review.%s.uploadhashtags' % branch.project.remote.review
+        hashtags = set(_ExpandHashtag(branch.project.config.GetString(key)))
+        for tag in opt.hashtags:
+          hashtags.update(_ExpandHashtag(tag))
+        if opt.hashtag_branch:
+          hashtags.add(branch.name)
 
         destination = opt.dest_branch or branch.project.dest_branch
 
@@ -400,7 +442,9 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             continue
 
         branch.UploadForReview(people,
+                               dryrun=opt.dryrun,
                                auto_topic=opt.auto_topic,
+                               hashtags=hashtags,
                                draft=opt.draft,
                                private=opt.private,
                                notify=None if opt.notify else 'NONE',
@@ -486,8 +530,12 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         pending.append((project, avail))
 
     if not pending:
-      print("no branches ready for upload", file=sys.stderr)
-      return
+      if branch is None:
+        print('repo: error: no branches ready for upload', file=sys.stderr)
+      else:
+        print('repo: error: no branches named "%s" ready for upload' %
+              (branch,), file=sys.stderr)
+      return 1
 
     if not opt.bypass_hooks:
       hook = RepoHook('pre-upload', self.manifest.repo_hooks_project,

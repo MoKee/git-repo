@@ -127,7 +127,8 @@ without iterating through the remaining projects.
                  help="Execute the command only on projects matching regex or wildcard expression")
     p.add_option('-i', '--inverse-regex',
                  dest='inverse_regex', action='store_true',
-                 help="Execute the command only on projects not matching regex or wildcard expression")
+                 help="Execute the command only on projects not matching regex or "
+                      "wildcard expression")
     p.add_option('-g', '--groups',
                  dest='groups',
                  help="Execute the command only on projects matching the specified groups")
@@ -309,8 +310,6 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
   def setenv(name, val):
     if val is None:
       val = ''
-    if hasattr(val, 'encode'):
-      val = val.encode()
     env[name] = val
 
   setenv('REPO_PROJECT', project['name'])

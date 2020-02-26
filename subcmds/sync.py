@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from __future__ import print_function
+
 import json
 import netrc
 from optparse import SUPPRESS_HELP
@@ -234,9 +235,12 @@ later is required to fix a server side protocol bug.
     p.add_option('-c', '--current-branch',
                  dest='current_branch_only', action='store_true',
                  help='fetch only current branch from server')
+    p.add_option('-v', '--verbose',
+                 dest='output_mode', action='store_true',
+                 help='show all sync output')
     p.add_option('-q', '--quiet',
-                 dest='quiet', action='store_true',
-                 help='be more quiet')
+                 dest='output_mode', action='store_false',
+                 help='only show errors')
     p.add_option('-j', '--jobs',
                  dest='jobs', action='store', type='int',
                  help="projects to fetch simultaneously (default %d)" % self.jobs)
@@ -244,7 +248,7 @@ later is required to fix a server side protocol bug.
                  dest='manifest_name',
                  help='temporary manifest to use for this sync', metavar='NAME.xml')
     p.add_option('--no-clone-bundle',
-                 dest='no_clone_bundle', action='store_true',
+                 dest='clone_bundle', default=True, action='store_false',
                  help='disable use of /clone.bundle on HTTP/HTTPS')
     p.add_option('-u', '--manifest-server-username', action='store',
                  dest='manifest_server_username',
@@ -256,7 +260,7 @@ later is required to fix a server side protocol bug.
                  dest='fetch_submodules', action='store_true',
                  help='fetch submodules from server')
     p.add_option('--no-tags',
-                 dest='no_tags', action='store_true',
+                 dest='tags', default=True, action='store_false',
                  help="don't fetch tags")
     p.add_option('--optimized-fetch',
                  dest='optimized_fetch', action='store_true',
@@ -273,7 +277,7 @@ later is required to fix a server side protocol bug.
 
     g = p.add_option_group('repo Version options')
     g.add_option('--no-repo-verify',
-                 dest='no_repo_verify', action='store_true',
+                 dest='repo_verify', default=True, action='store_false',
                  help='do not verify repo source code')
     g.add_option('--repo-upgraded',
                  dest='repo_upgraded', action='store_true',
@@ -332,10 +336,11 @@ later is required to fix a server side protocol bug.
       try:
         success = project.Sync_NetworkHalf(
             quiet=opt.quiet,
+            verbose=opt.verbose,
             current_branch_only=opt.current_branch_only,
             force_sync=opt.force_sync,
-            clone_bundle=not opt.no_clone_bundle,
-            no_tags=opt.no_tags, archive=self.manifest.IsArchive,
+            clone_bundle=opt.clone_bundle,
+            tags=opt.tags, archive=self.manifest.IsArchive,
             optimized_fetch=opt.optimized_fetch,
             prune=opt.prune,
             clone_filter=clone_filter)
@@ -567,12 +572,12 @@ later is required to fix a server side protocol bug.
     gc_gitdirs = {}
     for project in projects:
       # Make sure pruning never kicks in with shared projects.
-      if len(project.manifest.GetProjectsWithName(project.name)) > 1:
+      if (not project.use_git_worktrees and
+              len(project.manifest.GetProjectsWithName(project.name)) > 1):
         print('%s: Shared project %s found, disabling pruning.' %
               (project.relpath, project.name))
         if git_require((2, 7, 0)):
-          project.config.SetString('core.repositoryFormatVersion', '1')
-          project.config.SetString('extensions.preciousObjects', 'true')
+          project.EnableRepositoryExtension('preciousObjects')
         else:
           # This isn't perfect, but it's the best we can do with old git.
           print('%s: WARNING: shared projects are unreliable when using old '
@@ -629,65 +634,6 @@ later is required to fix a server side protocol bug.
     else:
       self.manifest._Unload()
 
-  def _DeleteProject(self, path):
-    print('Deleting obsolete path %s' % path, file=sys.stderr)
-
-    # Delete the .git directory first, so we're less likely to have a partially
-    # working git repository around. There shouldn't be any git projects here,
-    # so rmtree works.
-    try:
-      platform_utils.rmtree(os.path.join(path, '.git'))
-    except OSError as e:
-      print('Failed to remove %s (%s)' % (os.path.join(path, '.git'), str(e)), file=sys.stderr)
-      print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
-      print('       remove manually, then run sync again', file=sys.stderr)
-      return 1
-
-    # Delete everything under the worktree, except for directories that contain
-    # another git project
-    dirs_to_remove = []
-    failed = False
-    for root, dirs, files in platform_utils.walk(path):
-      for f in files:
-        try:
-          platform_utils.remove(os.path.join(root, f))
-        except OSError as e:
-          print('Failed to remove %s (%s)' % (os.path.join(root, f), str(e)), file=sys.stderr)
-          failed = True
-      dirs[:] = [d for d in dirs
-                 if not os.path.lexists(os.path.join(root, d, '.git'))]
-      dirs_to_remove += [os.path.join(root, d) for d in dirs
-                         if os.path.join(root, d) not in dirs_to_remove]
-    for d in reversed(dirs_to_remove):
-      if platform_utils.islink(d):
-        try:
-          platform_utils.remove(d)
-        except OSError as e:
-          print('Failed to remove %s (%s)' % (os.path.join(root, d), str(e)), file=sys.stderr)
-          failed = True
-      elif len(platform_utils.listdir(d)) == 0:
-        try:
-          platform_utils.rmdir(d)
-        except OSError as e:
-          print('Failed to remove %s (%s)' % (os.path.join(root, d), str(e)), file=sys.stderr)
-          failed = True
-          continue
-    if failed:
-      print('error: Failed to delete obsolete path %s' % path, file=sys.stderr)
-      print('       remove manually, then run sync again', file=sys.stderr)
-      return 1
-
-    # Try deleting parent dirs if they are empty
-    project_dir = path
-    while project_dir != self.manifest.topdir:
-      if len(platform_utils.listdir(project_dir)) == 0:
-        platform_utils.rmdir(project_dir)
-      else:
-        break
-      project_dir = os.path.dirname(project_dir)
-
-    return 0
-
   def UpdateProjectList(self, opt):
     new_project_paths = []
     for project in self.GetProjects(None, missing_ok=True):
@@ -714,23 +660,15 @@ later is required to fix a server side protocol bug.
                 remote=RemoteSpec('origin'),
                 gitdir=gitdir,
                 objdir=gitdir,
+                use_git_worktrees=os.path.isfile(gitdir),
                 worktree=os.path.join(self.manifest.topdir, path),
                 relpath=path,
                 revisionExpr='HEAD',
                 revisionId=None,
                 groups=None)
-
-            if project.IsDirty() and opt.force_remove_dirty:
-              print('WARNING: Removing dirty project "%s": uncommitted changes '
-                    'erased' % project.relpath, file=sys.stderr)
-              self._DeleteProject(project.worktree)
-            elif project.IsDirty():
-              print('error: Cannot remove project "%s": uncommitted changes '
-                    'are present' % project.relpath, file=sys.stderr)
-              print('       commit changes, then run sync again',
-                    file=sys.stderr)
-              return 1
-            elif self._DeleteProject(project.worktree):
+            if not project.DeleteWorktree(
+                    quiet=opt.quiet,
+                    force=opt.force_remove_dirty):
               return 1
 
     new_project_paths.sort()
@@ -792,13 +730,13 @@ later is required to fix a server side protocol bug.
         if branch.startswith(R_HEADS):
           branch = branch[len(R_HEADS):]
 
-        env = os.environ.copy()
-        if 'SYNC_TARGET' in env:
-          target = env['SYNC_TARGET']
+        if 'SYNC_TARGET' in os.environ:
+          target = os.environ('SYNC_TARGET')
           [success, manifest_str] = server.GetApprovedManifest(branch, target)
-        elif 'TARGET_PRODUCT' in env and 'TARGET_BUILD_VARIANT' in env:
-          target = '%s-%s' % (env['TARGET_PRODUCT'],
-                              env['TARGET_BUILD_VARIANT'])
+        elif ('TARGET_PRODUCT' in os.environ and
+              'TARGET_BUILD_VARIANT' in os.environ):
+          target = '%s-%s' % (os.environ('TARGET_PRODUCT'),
+                              os.environ('TARGET_BUILD_VARIANT'))
           [success, manifest_str] = server.GetApprovedManifest(branch, target)
         else:
           [success, manifest_str] = server.GetApprovedManifest(branch)
@@ -837,9 +775,9 @@ later is required to fix a server side protocol bug.
     """Fetch & update the local manifest project."""
     if not opt.local_only:
       start = time.time()
-      success = mp.Sync_NetworkHalf(quiet=opt.quiet,
+      success = mp.Sync_NetworkHalf(quiet=opt.quiet, verbose=opt.verbose,
                                     current_branch_only=opt.current_branch_only,
-                                    no_tags=opt.no_tags,
+                                    tags=opt.tags,
                                     optimized_fetch=opt.optimized_fetch,
                                     submodules=self.manifest.HasSubmodules,
                                     clone_filter=self.manifest.CloneFilter)
@@ -884,6 +822,9 @@ later is required to fix a server side protocol bug.
     if self.jobs > 1:
       soft_limit, _ = _rlimit_nofile()
       self.jobs = min(self.jobs, (soft_limit - 5) // 3)
+
+    opt.quiet = opt.output_mode is False
+    opt.verbose = opt.output_mode is True
 
     if opt.manifest_name:
       self.manifest.Override(opt.manifest_name)
@@ -972,7 +913,7 @@ later is required to fix a server side protocol bug.
 
       fetched = self._Fetch(to_fetch, opt, err_event)
 
-      _PostRepoFetch(rp, opt.no_repo_verify)
+      _PostRepoFetch(rp, opt.repo_verify)
       if opt.network_only:
         # bail out now; the rest touches the working tree
         if err_event.isSet():
@@ -1062,11 +1003,11 @@ def _PostRepoUpgrade(manifest, quiet=False):
       project.PostRepoUpgrade()
 
 
-def _PostRepoFetch(rp, no_repo_verify=False, verbose=False):
+def _PostRepoFetch(rp, repo_verify=True, verbose=False):
   if rp.HasChanges:
     print('info: A new version of repo is available', file=sys.stderr)
     print(file=sys.stderr)
-    if no_repo_verify or _VerifyTag(rp):
+    if not repo_verify or _VerifyTag(rp):
       syncbuf = SyncBuffer(rp.config)
       rp.Sync_LocalHalf(syncbuf)
       if not syncbuf.Finish():
@@ -1106,8 +1047,8 @@ def _VerifyTag(project):
     return False
 
   env = os.environ.copy()
-  env['GIT_DIR'] = project.gitdir.encode()
-  env['GNUPGHOME'] = gpg_dir.encode()
+  env['GIT_DIR'] = project.gitdir
+  env['GNUPGHOME'] = gpg_dir
 
   cmd = [GIT, 'tag', '-v', cur]
   proc = subprocess.Popen(cmd,
@@ -1197,7 +1138,7 @@ class PersistentTransport(xmlrpc.client.Transport):
       # Since we're only using them for HTTP, copy the file temporarily,
       # stripping those prefixes away.
       if cookiefile:
-        tmpcookiefile = tempfile.NamedTemporaryFile()
+        tmpcookiefile = tempfile.NamedTemporaryFile(mode='w')
         tmpcookiefile.write("# HTTP Cookie File")
         try:
           with open(cookiefile) as f:

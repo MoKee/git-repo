@@ -23,6 +23,10 @@ It is always safe to re-run `repo init` in existing repo client checkouts.
 For example, if you want to change the manifest branch, you can simply run
 `repo init --manifest-branch=<new name>` and repo will take care of the rest.
 
+*   `config`: Per-repo client checkout settings using [git-config] file format.
+*   `.repo_config.json`: JSON cache of the `config` file for repo to
+    read/process quickly.
+
 ### repo/ state
 
 *   `repo/`: A git checkout of the repo project.  This is how `repo` re-execs
@@ -64,13 +68,20 @@ support, see the [manifest-format.md] file.
     If you want to switch the tracking settings, re-run `repo init` with the
     new settings.
 
+*   `manifest.xml`: The manifest that repo uses.  It is generated at `repo init`
+    and uses the `--manifest-name` to determine what manifest file to load next
+    out of `manifests/`.
+
+    Do not try to modify this to load other manifests as it will confuse repo.
+    If you want to switch manifest files, re-run `repo init` with the new
+    setting.
+
+    Older versions of repo managed this with symlinks.
+
 *   `manifest.xml -> manifests/<manifest-name>.xml`: A symlink to the manifest
     that the user wishes to sync.  It is specified at `repo init` time via
     `--manifest-name`.
 
-    Do not try to repoint this symlink to other files as it will confuse repo.
-    If you want to switch manifest files, re-run `repo init` with the new
-    setting.
 
 *   `manifests.git/.repo_config.json`: JSON cache of the `manifests.git/config`
     file for repo to read/process quickly.
@@ -92,18 +103,27 @@ support, see the [manifest-format.md] file.
     Some git state is further split out under `project-objects/`.
 *   `project-objects/`: Git objects that are safe to share across multiple
     git checkouts.  The filesystem layout matches the `<project name=...`
-    setting in the manifest (i.e. the path on the remote server).  This allows
-    for multiple checkouts of the same remote git repo to share their objects.
-    For example, you could have different branches of `foo/bar.git` checked
-    out to `foo/bar-master`, `foo/bar-release`, etc...  There will be multiple
-    trees under `projects/` for each one, but only one under `project-objects/`.
+    setting in the manifest (i.e. the path on the remote server) with a `.git`
+    suffix.  This allows for multiple checkouts of the same remote git repo to
+    share their objects.  For example, you could have different branches of
+    `foo/bar.git` checked out to `foo/bar-master`, `foo/bar-release`, etc...
+    There will be multiple trees under `projects/` for each one, but only one
+    under `project-objects/`.
 
-    This can run into problems if different remotes use the same path on their
-    respective servers ...
+    This layout is designed to allow people to sync against different remotes
+    (e.g. a local mirror & a public review server) while avoiding duplicating
+    the content.  However, this can run into problems if different remotes use
+    the same path on their respective servers.  Best to avoid that.
 *   `subprojects/`: Like `projects/`, but for git submodules.
 *   `subproject-objects/`: Like `project-objects/`, but for git submodules.
+*   `worktrees/`: Bare checkouts of every project synced by the manifest.  The
+    filesystem layout matches the `<project name=...` setting in the manifest
+    (i.e. the path on the remote server) with a `.git` suffix.  This has the
+    same advantages as the `project-objects/` layout above.
 
-### Settings
+    This is used when git worktrees are enabled.
+
+### Global settings
 
 The `.repo/manifests.git/config` file is used to track settings for the entire
 repo client checkout.
@@ -121,25 +141,88 @@ User controlled settings are initialized when running `repo init`.
 | repo.partialclone | `--partial-clone`         | Create [partial git clones] |
 | repo.reference    | `--reference`             | Reference repo client checkout |
 | repo.submodules   | `--submodules`            | Sync git submodules |
+| repo.worktree     | `--worktree`              | Use `git worktree` for checkouts |
 | user.email        | `--config-name`           | User's e-mail address; Copied into `.git/config` when checking out a new project |
 | user.name         | `--config-name`           | User's name; Copied into `.git/config` when checking out a new project |
 
 [partial git clones]: https://git-scm.com/docs/gitrepository-layout#_code_partialclone_code
+
+### Repo hooks settings
+
+For more details on this feature, see the [repo-hooks docs](./repo-hooks.md).
+We'll just discuss the internal configuration settings.
+These are stored in the registered `<repo-hooks>` project itself, so if the
+manifest switches to a different project, the settings will not be copied.
+
+| Setting                              | Use/Meaning |
+|--------------------------------------|-------------|
+| repo.hooks.\<hook\>.approvedmanifest | User approval for secure manifest sources (e.g. https://) |
+| repo.hooks.\<hook\>.approvedhash     | User approval for insecure manifest sources (e.g. http://) |
+
+
+For example, if our manifest had the following entries, we would store settings
+under `.repo/projects/src/repohooks.git/config` (which would be reachable via
+`git --git-dir=src/repohooks/.git config`).
+```xml
+  <project path="src/repohooks" name="chromiumos/repohooks" ... />
+  <repo-hooks in-project="chromiumos/repohooks" ... />
+```
+
+If `<hook>` is `pre-upload`, the `.git/config` setting might be:
+```ini
+[repo "hooks.pre-upload"]
+	approvedmanifest = https://chromium.googlesource.com/chromiumos/manifest
+```
+
+## Per-project settings
+
+These settings are somewhat meant to be tweaked by the user on a per-project
+basis (e.g. `git config` in a checked out source repo).
+
+Where possible, we re-use standard git settings to avoid confusion, and we
+refrain from documenting those, so see [git-config] documentation instead.
+
+See `repo help upload` for documentation on `[review]` settings.
+
+The `[remote]` settings are automatically populated/updated from the manifest.
+
+The `[branch]` settings are updated by `repo start` and `git branch`.
+
+| Setting                       | Subcommands   | Use/Meaning |
+|-------------------------------|---------------|-------------|
+| review.\<url\>.autocopy       | upload        | Automatically add to `--cc=<value>` |
+| review.\<url\>.autoreviewer   | upload        | Automatically add to `--reviewers=<value>` |
+| review.\<url\>.autoupload     | upload        | Automatically answer "yes" or "no" to all prompts |
+| review.\<url\>.uploadhashtags | upload        | Automatically add to `--hashtags=<value>` |
+| review.\<url\>.uploadtopic    | upload        | Default [topic] to use |
+| review.\<url\>.username       | upload        | Override username with `ssh://` review URIs |
+| remote.\<remote\>.fetch       | sync          | Set of refs to fetch |
+| remote.\<remote\>.projectname | \<network\>   | The name of the project as it exists in Gerrit review |
+| remote.\<remote\>.pushurl     | upload        | The base URI for pushing CLs |
+| remote.\<remote\>.review      | upload        | The URI of the Gerrit review server |
+| remote.\<remote\>.url         | sync & upload | The URI of the git project to fetch |
+| branch.\<branch\>.merge       | sync & upload | The branch to merge & upload & track |
+| branch.\<branch\>.remote      | sync & upload | The remote to track |
 
 ## ~/ dotconfig layout
 
 Repo will create & maintain a few files in the user's home directory.
 
 *   `.repoconfig/`: Repo's per-user directory for all random config files/state.
+*   `.repoconfig/config`: Per-user settings using [git-config] file format.
 *   `.repoconfig/keyring-version`: Cache file for checking if the gnupg subdir
     has all the same keys as the repo launcher.  Used to avoid running gpg
     constantly as that can be quite slow.
 *   `.repoconfig/gnupg/`: GnuPG's internal state directory used when repo needs
     to run `gpg`.  This provides isolation from the user's normal `~/.gnupg/`.
 
+*   `.repoconfig/.repo_config.json`: JSON cache of the `.repoconfig/config`
+    file for repo to read/process quickly.
 *   `.repo_.gitconfig.json`: JSON cache of the `.gitconfig` file for repo to
     read/process quickly.
 
 
+[git-config]: https://git-scm.com/docs/git-config
 [manifest-format.md]: ./manifest-format.md
 [local manifests]: ./manifest-format.md#Local-Manifests
+[topic]: https://gerrit-review.googlesource.com/Documentation/intro-user.html#topics
