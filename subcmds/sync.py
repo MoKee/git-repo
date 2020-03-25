@@ -731,12 +731,12 @@ later is required to fix a server side protocol bug.
           branch = branch[len(R_HEADS):]
 
         if 'SYNC_TARGET' in os.environ:
-          target = os.environ('SYNC_TARGET')
+          target = os.environ['SYNC_TARGET']
           [success, manifest_str] = server.GetApprovedManifest(branch, target)
         elif ('TARGET_PRODUCT' in os.environ and
               'TARGET_BUILD_VARIANT' in os.environ):
-          target = '%s-%s' % (os.environ('TARGET_PRODUCT'),
-                              os.environ('TARGET_BUILD_VARIANT'))
+          target = '%s-%s' % (os.environ['TARGET_PRODUCT'],
+                              os.environ['TARGET_BUILD_VARIANT'])
           [success, manifest_str] = server.GetApprovedManifest(branch, target)
         else:
           [success, manifest_str] = server.GetApprovedManifest(branch)
@@ -847,6 +847,13 @@ later is required to fix a server side protocol bug.
 
     rp = self.manifest.repoProject
     rp.PreSync()
+    cb = rp.CurrentBranch
+    if cb:
+      base = rp.GetBranch(cb).merge
+      if not base or not base.startswith('refs/heads/'):
+        print('warning: repo is not tracking a remote branch, so it will not '
+              'receive updates; run `repo init --repo-rev=stable` to fix.',
+              file=sys.stderr)
 
     mp = self.manifest.manifestProject
     mp.PreSync()

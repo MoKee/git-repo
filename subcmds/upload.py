@@ -134,7 +134,18 @@ review.URL.uploadhashtags:
 
 To add hashtags whenever uploading a commit, you can set a per-project
 or global Git option to do so. The value of review.URL.uploadhashtags
-will be used as comma delimited hashtags like the --hashtags option.
+will be used as comma delimited hashtags like the --hashtag option.
+
+review.URL.uploadlabels:
+
+To add labels whenever uploading a commit, you can set a per-project
+or global Git option to do so. The value of review.URL.uploadlabels
+will be used as comma delimited labels like the --label option.
+
+review.URL.uploadnotify:
+
+Control e-mail notifications when uploading.
+https://gerrit-review.googlesource.com/Documentation/user-upload.html#notify
 
 # References
 
@@ -152,6 +163,9 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
     p.add_option('--hashtag-branch', '--htb',
                  action='store_true',
                  help='Add local branch name as a hashtag.')
+    p.add_option('-l', '--label',
+                 dest='labels', action='append', default=[],
+                 help='Add a label when uploading.')
     p.add_option('--re', '--reviewers',
                  type='string', action='append', dest='reviewers',
                  help='Request reviews from these people.')
@@ -164,9 +178,6 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
     p.add_option('--cbr', '--current-branch',
                  dest='current_branch', action='store_true',
                  help='Upload current git branch.')
-    p.add_option('-d', '--draft',
-                 action='store_true', dest='draft', default=False,
-                 help='If specified, upload as a draft.')
     p.add_option('--ne', '--no-emails',
                  action='store_false', dest='notify', default=True,
                  help='If specified, do not send emails on upload.')
@@ -238,7 +249,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
 
       destination = opt.dest_branch or project.dest_branch or project.revisionExpr
       print('Upload project %s/ to remote branch %s%s:' %
-            (project.relpath, destination, ' (draft)' if opt.draft else ''))
+            (project.relpath, destination, ' (private)' if opt.private else ''))
       print('  branch %s (%2d commit%s, %s):' % (
           name,
           len(commit_list),
@@ -410,21 +421,41 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
           key = 'review.%s.uploadtopic' % branch.project.remote.review
           opt.auto_topic = branch.project.config.GetBoolean(key)
 
-        # Check if hashtags should be included.
-        def _ExpandHashtag(value):
-          """Split |value| up into comma delimited tags."""
+        def _ExpandCommaList(value):
+          """Split |value| up into comma delimited entries."""
           if not value:
             return
-          for tag in value.split(','):
-            tag = tag.strip()
-            if tag:
-              yield tag
+          for ret in value.split(','):
+            ret = ret.strip()
+            if ret:
+              yield ret
+
+        # Check if hashtags should be included.
         key = 'review.%s.uploadhashtags' % branch.project.remote.review
-        hashtags = set(_ExpandHashtag(branch.project.config.GetString(key)))
+        hashtags = set(_ExpandCommaList(branch.project.config.GetString(key)))
         for tag in opt.hashtags:
-          hashtags.update(_ExpandHashtag(tag))
+          hashtags.update(_ExpandCommaList(tag))
         if opt.hashtag_branch:
           hashtags.add(branch.name)
+
+        # Check if labels should be included.
+        key = 'review.%s.uploadlabels' % branch.project.remote.review
+        labels = set(_ExpandCommaList(branch.project.config.GetString(key)))
+        for label in opt.labels:
+          labels.update(_ExpandCommaList(label))
+        # Basic sanity check on label syntax.
+        for label in labels:
+          if not re.match(r'^.+[+-][0-9]+$', label):
+            print('repo: error: invalid label syntax "%s": labels use forms '
+                  'like CodeReview+1 or Verified-1' % (label,), file=sys.stderr)
+            sys.exit(1)
+
+        # Handle e-mail notifications.
+        if opt.notify is False:
+          notify = 'NONE'
+        else:
+          key = 'review.%s.uploadnotify' % branch.project.remote.review
+          notify = branch.project.config.GetString(key)
 
         destination = opt.dest_branch or branch.project.dest_branch
 
@@ -445,9 +476,9 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                                dryrun=opt.dryrun,
                                auto_topic=opt.auto_topic,
                                hashtags=hashtags,
-                               draft=opt.draft,
+                               labels=labels,
                                private=opt.private,
-                               notify=None if opt.notify else 'NONE',
+                               notify=notify,
                                wip=opt.wip,
                                dest_branch=destination,
                                validate_certs=opt.validate_certs,

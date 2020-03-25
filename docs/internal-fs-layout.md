@@ -34,7 +34,7 @@ For example, if you want to change the manifest branch, you can simply run
 
     It tracks the git repository at `REPO_URL` using the `REPO_REV` branch.
     Those are specified at `repo init` time using the `--repo-url=<REPO_URL>`
-    and `--repo-branch=<REPO_REV>` options.
+    and `--repo-rev=<REPO_REV>` options.
 
     Any changes made to this directory will usually be automatically discarded
     by repo itself when it checks for updates.  If you want to update to the
@@ -193,7 +193,9 @@ The `[branch]` settings are updated by `repo start` and `git branch`.
 | review.\<url\>.autocopy       | upload        | Automatically add to `--cc=<value>` |
 | review.\<url\>.autoreviewer   | upload        | Automatically add to `--reviewers=<value>` |
 | review.\<url\>.autoupload     | upload        | Automatically answer "yes" or "no" to all prompts |
-| review.\<url\>.uploadhashtags | upload        | Automatically add to `--hashtags=<value>` |
+| review.\<url\>.uploadhashtags | upload        | Automatically add to `--hashtag=<value>` |
+| review.\<url\>.uploadlabels   | upload        | Automatically add to `--label=<value>` |
+| review.\<url\>.uploadnotify   | upload        | [Notify setting][upload-notify] to use |
 | review.\<url\>.uploadtopic    | upload        | Default [topic] to use |
 | review.\<url\>.username       | upload        | Override username with `ssh://` review URIs |
 | remote.\<remote\>.fetch       | sync          | Set of refs to fetch |
@@ -226,3 +228,4 @@ Repo will create & maintain a few files in the user's home directory.
 [manifest-format.md]: ./manifest-format.md
 [local manifests]: ./manifest-format.md#Local-Manifests
 [topic]: https://gerrit-review.googlesource.com/Documentation/intro-user.html#topics
+[upload-notify]: https://gerrit-review.googlesource.com/Documentation/user-upload.html#notify
