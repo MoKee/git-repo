@@ -34,6 +34,12 @@ The manifest and (if present) local_manifest.xml are combined
 together to produce a single manifest file.  This file can be stored
 in a Git repository for use during future 'repo init' invocations.
 
+The -r option can be used to generate a manifest file with project
+revisions set to the current commit hash.  These are known as
+"revision locked manifests", as they don't follow a particular branch.
+In this case, the 'upstream' attribute is set to the ref we were on
+when the manifest was generated.  The 'dest-branch' attribute is set
+to indicate the remote ref to push changes to via 'repo upload'.
 """
 
   @property
@@ -57,6 +63,11 @@ in a Git repository for use during future 'repo init' invocations.
                  help='If in -r mode, do not write the upstream field.  '
                  'Only of use if the branch names for a sha1 manifest are '
                  'sensitive.')
+    p.add_option('--suppress-dest-branch', dest='peg_rev_dest_branch',
+                 default=True, action='store_false',
+                 help='If in -r mode, do not write the dest-branch field.  '
+                 'Only of use if the branch names for a sha1 manifest are '
+                 'sensitive.')
     p.add_option('-o', '--output-file',
                  dest='output_file',
                  default='-',
@@ -74,7 +85,8 @@ in a Git repository for use during future 'repo init' invocations.
       fd = open(opt.output_file, 'w')
     self.manifest.Save(fd,
                        peg_rev=opt.peg_rev,
-                       peg_rev_upstream=opt.peg_rev_upstream)
+                       peg_rev_upstream=opt.peg_rev_upstream,
+                       peg_rev_dest_branch=opt.peg_rev_dest_branch)
     fd.close()
     if opt.output_file != '-':
       print('Saved manifest to %s' % opt.output_file, file=sys.stderr)
