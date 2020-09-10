@@ -138,11 +138,11 @@ if the manifest server specified in the manifest file already includes
 credentials.
 
 By default, all projects will be synced. The --fail-fast option can be used
-to halt syncing as soon as possible when the the first project fails to sync.
+to halt syncing as soon as possible when the first project fails to sync.
 
 The --force-sync option can be used to overwrite existing git
 directories if they have previously been linked to a different
-object direcotry. WARNING: This may cause data to be lost since
+object directory. WARNING: This may cause data to be lost since
 refs may be removed when overwriting.
 
 The --force-remove-dirty option can be used to remove previously used
