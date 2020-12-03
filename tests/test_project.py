@@ -44,45 +44,6 @@ def TempGitTree():
     platform_utils.rmtree(tempdir)
 
 
-class RepoHookShebang(unittest.TestCase):
-  """Check shebang parsing in RepoHook."""
-
-  def test_no_shebang(self):
-    """Lines w/out shebangs should be rejected."""
-    DATA = (
-        '',
-        '# -*- coding:utf-8 -*-\n',
-        '#\n# foo\n',
-        '# Bad shebang in script\n#!/foo\n'
-    )
-    for data in DATA:
-      self.assertIsNone(project.RepoHook._ExtractInterpFromShebang(data))
-
-  def test_direct_interp(self):
-    """Lines whose shebang points directly to the interpreter."""
-    DATA = (
-        ('#!/foo', '/foo'),
-        ('#! /foo', '/foo'),
-        ('#!/bin/foo ', '/bin/foo'),
-        ('#! /usr/foo ', '/usr/foo'),
-        ('#! /usr/foo -args', '/usr/foo'),
-    )
-    for shebang, interp in DATA:
-      self.assertEqual(project.RepoHook._ExtractInterpFromShebang(shebang),
-                       interp)
-
-  def test_env_interp(self):
-    """Lines whose shebang launches through `env`."""
-    DATA = (
-        ('#!/usr/bin/env foo', 'foo'),
-        ('#!/bin/env foo', 'foo'),
-        ('#! /bin/env /bin/foo ', '/bin/foo'),
-    )
-    for shebang, interp in DATA:
-      self.assertEqual(project.RepoHook._ExtractInterpFromShebang(shebang),
-                       interp)
-
-
 class FakeProject(object):
   """A fake for Project for basic functionality."""
 
@@ -116,7 +77,7 @@ class ReviewableBranchTests(unittest.TestCase):
 
       # Start off with the normal details.
       rb = project.ReviewableBranch(
-          fakeproj, fakeproj.config.GetBranch('work'), 'master')
+          fakeproj, fakeproj.config.GetBranch('work'), 'main')
       self.assertEqual('work', rb.name)
       self.assertEqual(1, len(rb.commits))
       self.assertIn('Del file', rb.commits[0])
@@ -129,9 +90,9 @@ class ReviewableBranchTests(unittest.TestCase):
       self.assertTrue(rb.date)
 
       # Now delete the tracking branch!
-      fakeproj.work_git.branch('-D', 'master')
+      fakeproj.work_git.branch('-D', 'main')
       rb = project.ReviewableBranch(
-          fakeproj, fakeproj.config.GetBranch('work'), 'master')
+          fakeproj, fakeproj.config.GetBranch('work'), 'main')
       self.assertEqual(0, len(rb.commits))
       self.assertFalse(rb.base_exists)
       # Hard to assert anything useful about this.

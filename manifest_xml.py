@@ -31,7 +31,7 @@ else:
   urllib.parse = urlparse
 
 import gitc_utils
-from git_config import GitConfig
+from git_config import GitConfig, IsId
 from git_refs import R_HEADS, HEAD
 import platform_utils
 from project import RemoteSpec, Project, MetaProject
@@ -187,13 +187,24 @@ class _XmlRemote(object):
 class XmlManifest(object):
   """manages the repo configuration file"""
 
-  def __init__(self, repodir):
+  def __init__(self, repodir, manifest_file, local_manifests=None):
+    """Initialize.
+
+    Args:
+      repodir: Path to the .repo/ dir for holding all internal checkout state.
+          It must be in the top directory of the repo client checkout.
+      manifest_file: Full path to the manifest file to parse.  This will usually
+          be |repodir|/|MANIFEST_FILE_NAME|.
+      local_manifests: Full path to the directory of local override manifests.
+          This will usually be |repodir|/|LOCAL_MANIFESTS_DIR_NAME|.
+    """
+    # TODO(vapier): Move this out of this class.
+    self.globalConfig = GitConfig.ForUser()
+
     self.repodir = os.path.abspath(repodir)
     self.topdir = os.path.dirname(self.repodir)
-    self.manifestFile = os.path.join(self.repodir, MANIFEST_FILE_NAME)
-    self.globalConfig = GitConfig.ForUser()
-    self.localManifestWarning = False
-    self.isGitcClient = False
+    self.manifestFile = manifest_file
+    self.local_manifests = local_manifests
     self._load_local_manifests = True
 
     self.repoProject = MetaProject(self, 'repo',
@@ -284,9 +295,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
   def _ParseGroups(self, groups):
     return [x for x in re.split(r'[,\s]+', groups) if x]
 
-  def Save(self, fd, peg_rev=False, peg_rev_upstream=True, peg_rev_dest_branch=True, groups=None):
-    """Write the current manifest out to the given file descriptor.
-    """
+  def ToXml(self, peg_rev=False, peg_rev_upstream=True, peg_rev_dest_branch=True, groups=None):
+    """Return the current manifest XML."""
     mp = self.manifestProject
 
     if groups is None:
@@ -460,6 +470,56 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                      ' '.join(self._repo_hooks_project.enabled_repo_hooks))
       root.appendChild(e)
 
+    return doc
+
+  def ToDict(self, **kwargs):
+    """Return the current manifest as a dictionary."""
+    # Elements that may only appear once.
+    SINGLE_ELEMENTS = {
+        'notice',
+        'default',
+        'manifest-server',
+        'repo-hooks',
+    }
+    # Elements that may be repeated.
+    MULTI_ELEMENTS = {
+        'remote',
+        'remove-project',
+        'project',
+        'extend-project',
+        'include',
+        # These are children of 'project' nodes.
+        'annotation',
+        'project',
+        'copyfile',
+        'linkfile',
+    }
+
+    doc = self.ToXml(**kwargs)
+    ret = {}
+
+    def append_children(ret, node):
+      for child in node.childNodes:
+        if child.nodeType == xml.dom.Node.ELEMENT_NODE:
+          attrs = child.attributes
+          element = dict((attrs.item(i).localName, attrs.item(i).value)
+                         for i in range(attrs.length))
+          if child.nodeName in SINGLE_ELEMENTS:
+            ret[child.nodeName] = element
+          elif child.nodeName in MULTI_ELEMENTS:
+            ret.setdefault(child.nodeName, []).append(element)
+          else:
+            raise ManifestParseError('Unhandled element "%s"' % (child.nodeName,))
+
+          append_children(element, child)
+
+    append_children(ret, doc.firstChild)
+
+    return ret
+
+  def Save(self, fd, **kwargs):
+    """Write the current manifest out to the given file descriptor."""
+    doc = self.ToXml(**kwargs)
     doc.writexml(fd, '', '  ', '\n', 'UTF-8')
 
   def _output_manifest_project_extras(self, p, e):
@@ -554,23 +614,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
       nodes.append(self._ParseManifestXml(self.manifestFile,
                                           self.manifestProject.worktree))
 
-      if self._load_local_manifests:
-        local = os.path.join(self.repodir, LOCAL_MANIFEST_NAME)
-        if os.path.exists(local):
-          if not self.localManifestWarning:
-            self.localManifestWarning = True
-            print('warning: %s is deprecated; put local manifests '
-                  'in `%s` instead' % (LOCAL_MANIFEST_NAME,
-                                       os.path.join(self.repodir, LOCAL_MANIFESTS_DIR_NAME)),
-                  file=sys.stderr)
-          nodes.append(self._ParseManifestXml(local, self.repodir))
-
-        local_dir = os.path.abspath(os.path.join(self.repodir,
-                                                 LOCAL_MANIFESTS_DIR_NAME))
+      if self._load_local_manifests and self.local_manifests:
         try:
-          for local_file in sorted(platform_utils.listdir(local_dir)):
+          for local_file in sorted(platform_utils.listdir(self.local_manifests)):
             if local_file.endswith('.xml'):
-              local = os.path.join(local_dir, local_file)
+              local = os.path.join(self.local_manifests, local_file)
               nodes.append(self._ParseManifestXml(local, self.repodir))
         except OSError:
           pass
@@ -589,7 +637,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
       self._loaded = True
 
-  def _ParseManifestXml(self, path, include_root):
+  def _ParseManifestXml(self, path, include_root, parent_groups=''):
     try:
       root = xml.dom.minidom.parse(path)
     except (OSError, xml.parsers.expat.ExpatError) as e:
@@ -608,12 +656,17 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     for node in manifest.childNodes:
       if node.nodeName == 'include':
         name = self._reqatt(node, 'name')
+        include_groups = ''
+        if parent_groups:
+          include_groups = parent_groups
+        if node.hasAttribute('groups'):
+          include_groups = node.getAttribute('groups') + ',' + include_groups
         fp = os.path.join(include_root, name)
         if not os.path.isfile(fp):
           raise ManifestParseError("include %s doesn't exist or isn't a file"
                                    % (name,))
         try:
-          nodes.extend(self._ParseManifestXml(fp, include_root))
+          nodes.extend(self._ParseManifestXml(fp, include_root, include_groups))
         # should isolate this to the exact exception, but that's
         # tricky.  actual parsing implementation may vary.
         except (KeyboardInterrupt, RuntimeError, SystemExit):
@@ -622,6 +675,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
           raise ManifestParseError(
               "failed parsing included manifest %s: %s" % (name, e))
       else:
+        if parent_groups and node.nodeName == 'project':
+          nodeGroups = parent_groups
+          if node.hasAttribute('groups'):
+            nodeGroups = node.getAttribute('groups') + ',' + nodeGroups
+          node.setAttribute('groups', nodeGroups)
         nodes.append(node)
     return nodes
 
@@ -709,6 +767,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             p.groups.extend(groups)
           if revision:
             p.revisionExpr = revision
+            if IsId(revision):
+              p.revisionId = revision
+            else:
+              p.revisionId = None
           if remote:
             p.remote = remote.ToRemoteSpec(name)
       if node.nodeName == 'repo-hooks':
@@ -1204,15 +1266,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
 
 class GitcManifest(XmlManifest):
-
-  def __init__(self, repodir, gitc_client_name):
-    """Initialize the GitcManifest object."""
-    super(GitcManifest, self).__init__(repodir)
-    self.isGitcClient = True
-    self.gitc_client_name = gitc_client_name
-    self.gitc_client_dir = os.path.join(gitc_utils.get_gitc_manifest_dir(),
-                                        gitc_client_name)
-    self.manifestFile = os.path.join(self.gitc_client_dir, '.manifest')
+  """Parser for GitC (git-in-the-cloud) manifests."""
 
   def _ParseProject(self, node, parent=None):
     """Override _ParseProject and add support for GITC specific attributes."""
@@ -1223,3 +1277,38 @@ class GitcManifest(XmlManifest):
     """Output GITC Specific Project attributes"""
     if p.old_revision:
       e.setAttribute('old-revision', str(p.old_revision))
+
+
+class RepoClient(XmlManifest):
+  """Manages a repo client checkout."""
+
+  def __init__(self, repodir, manifest_file=None):
+    self.isGitcClient = False
+
+    if os.path.exists(os.path.join(repodir, LOCAL_MANIFEST_NAME)):
+      print('error: %s is not supported; put local manifests in `%s` instead' %
+            (LOCAL_MANIFEST_NAME, os.path.join(repodir, LOCAL_MANIFESTS_DIR_NAME)),
+            file=sys.stderr)
+      sys.exit(1)
+
+    if manifest_file is None:
+      manifest_file = os.path.join(repodir, MANIFEST_FILE_NAME)
+    local_manifests = os.path.abspath(os.path.join(repodir, LOCAL_MANIFESTS_DIR_NAME))
+    super(RepoClient, self).__init__(repodir, manifest_file, local_manifests)
+
+    # TODO: Completely separate manifest logic out of the client.
+    self.manifest = self
+
+
+class GitcClient(RepoClient, GitcManifest):
+  """Manages a GitC client checkout."""
+
+  def __init__(self, repodir, gitc_client_name):
+    """Initialize the GitcManifest object."""
+    self.gitc_client_name = gitc_client_name
+    self.gitc_client_dir = os.path.join(gitc_utils.get_gitc_manifest_dir(),
+                                        gitc_client_name)
+
+    super(GitcManifest, self).__init__(
+        repodir, os.path.join(self.gitc_client_dir, '.manifest'))
+    self.isGitcClient = True
