@@ -1,5 +1,3 @@
-# -*- coding:utf-8 -*-
-#
 # Copyright (C) 2008 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import print_function
 import copy
 import re
 import sys
@@ -26,11 +23,6 @@ from git_command import GitCommand
 from git_refs import R_HEADS
 from hooks import RepoHook
 
-from pyversion import is_python3
-if not is_python3():
-  input = raw_input  # noqa: F821
-else:
-  unicode = str
 
 UNUSUAL_COMMIT_THRESHOLD = 5
 

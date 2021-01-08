@@ -1,5 +1,3 @@
-# -*- coding:utf-8 -*-
-#
 # Copyright (C) 2019 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,8 +14,6 @@
 
 """Unittests for the project.py module."""
 
-from __future__ import print_function
-
 import contextlib
 import os
 import shutil
@@ -26,6 +22,7 @@ import tempfile
 import unittest
 
 import error
+import git_command
 import git_config
 import platform_utils
 import project
@@ -38,7 +35,19 @@ def TempGitTree():
   # Python 2 support entirely.
   try:
     tempdir = tempfile.mkdtemp(prefix='repo-tests')
-    subprocess.check_call(['git', 'init'], cwd=tempdir)
+
+    # Tests need to assume, that main is default branch at init,
+    # which is not supported in config until 2.28.
+    cmd = ['git', 'init']
+    if git_command.git_require((2, 28, 0)):
+      cmd += ['--initial-branch=main']
+    else:
+      # Use template dir for init.
+      templatedir = tempfile.mkdtemp(prefix='.test-template')
+      with open(os.path.join(templatedir, 'HEAD'), 'w') as fp:
+        fp.write('ref: refs/heads/main\n')
+      cmd += ['--template=', templatedir]
+    subprocess.check_call(cmd, cwd=tempdir)
     yield tempdir
   finally:
     platform_utils.rmtree(tempdir)

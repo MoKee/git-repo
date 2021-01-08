@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
 #
 # Copyright (C) 2008 The Android Open Source Project
 #
@@ -21,7 +20,6 @@ People shouldn't run this directly; instead, they should use the `repo` wrapper
 which takes care of execing this entry point.
 """
 
-from __future__ import print_function
 import getpass
 import netrc
 import optparse
@@ -30,15 +28,7 @@ import shlex
 import sys
 import textwrap
 import time
-
-from pyversion import is_python3
-if is_python3():
-  import urllib.request
-else:
-  import imp
-  import urllib2
-  urllib = imp.new_module('urllib')
-  urllib.request = urllib2
+import urllib.request
 
 try:
   import kerberos
@@ -50,6 +40,7 @@ import event_log
 from repo_trace import SetTrace
 from git_command import user_agent
 from git_config import init_ssh, close_ssh, RepoConfig
+from git_trace2_event_log import EventLog
 from command import InteractiveCommand
 from command import MirrorSafeCommand
 from command import GitcAvailableCommand, GitcClientCommand
@@ -69,8 +60,6 @@ from wrapper import WrapperPath, Wrapper
 
 from subcmds import all_commands
 
-if not is_python3():
-  input = raw_input  # noqa: F821
 
 # NB: These do not need to be kept in sync with the repo launcher script.
 # These may be much newer as it allows the repo launcher to roll between
@@ -82,7 +71,7 @@ if not is_python3():
 #
 # python-3.6 is in Ubuntu Bionic.
 MIN_PYTHON_VERSION_SOFT = (3, 6)
-MIN_PYTHON_VERSION_HARD = (3, 4)
+MIN_PYTHON_VERSION_HARD = (3, 5)
 
 if sys.version_info.major < 3:
   print('repo: error: Python 2 is no longer supported; '
@@ -130,6 +119,8 @@ global_options.add_option('--version',
 global_options.add_option('--event-log',
                           dest='event_log', action='store',
                           help='filename of event log to append timeline to')
+global_options.add_option('--git-trace2-event-log', action='store',
+                          help='directory to write git trace2 event log to')
 
 
 class _Repo(object):
@@ -211,6 +202,7 @@ class _Repo(object):
             file=sys.stderr)
       return 1
 
+    git_trace2_event_log = EventLog()
     cmd.repodir = self.repodir
     cmd.client = RepoClient(cmd.repodir)
     cmd.manifest = cmd.client.manifest
@@ -261,6 +253,8 @@ class _Repo(object):
     start = time.time()
     cmd_event = cmd.event_log.Add(name, event_log.TASK_COMMAND, start)
     cmd.event_log.SetParent(cmd_event)
+    git_trace2_event_log.StartEvent()
+
     try:
       cmd.ValidateOptions(copts, cargs)
       result = cmd.Execute(copts, cargs)
@@ -303,10 +297,13 @@ class _Repo(object):
 
       cmd.event_log.FinishEvent(cmd_event, finish,
                                 result is None or result == 0)
+      git_trace2_event_log.ExitEvent(result)
+
       if gopts.event_log:
         cmd.event_log.Write(os.path.abspath(
                             os.path.expanduser(gopts.event_log)))
 
+      git_trace2_event_log.Write(gopts.git_trace2_event_log)
     return result
 
 

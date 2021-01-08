@@ -1,5 +1,3 @@
-# -*- coding:utf-8 -*-
-#
 # Copyright (C) 2019 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,8 +13,6 @@
 # limitations under the License.
 
 """Unittests for the manifest_xml.py module."""
-
-from __future__ import print_function
 
 import os
 import shutil
@@ -211,6 +207,19 @@ class XmlManifestTests(unittest.TestCase):
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<manifest></manifest>')
     self.assertEqual(manifest.ToDict(), {})
+
+  def test_repo_hooks(self):
+    """Check repo-hooks settings."""
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="test-remote" fetch="http://localhost" />
+  <default remote="test-remote" revision="refs/heads/main" />
+  <project name="repohooks" path="src/repohooks"/>
+  <repo-hooks in-project="repohooks" enabled-list="a, b"/>
+</manifest>
+""")
+    self.assertEqual(manifest.repo_hooks_project.name, 'repohooks')
+    self.assertEqual(manifest.repo_hooks_project.enabled_repo_hooks, ['a', 'b'])
 
   def test_project_group(self):
     """Check project group settings."""

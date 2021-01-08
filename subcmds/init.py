@@ -1,5 +1,3 @@
-# -*- coding:utf-8 -*-
-#
 # Copyright (C) 2008 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,22 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import print_function
-
 import optparse
 import os
 import platform
 import re
 import sys
-
-from pyversion import is_python3
-if is_python3():
-  import urllib.parse
-else:
-  import imp
-  import urlparse
-  urllib = imp.new_module('urllib')
-  urllib.parse = urlparse
+import urllib.parse
 
 from color import Coloring
 from command import InteractiveCommand, MirrorSafeCommand
@@ -521,7 +509,7 @@ to update the working directory files.
           rp.gitdir, opt.repo_rev, repo_verify=opt.repo_verify, quiet=opt.quiet)
       branch = rp.GetBranch('default')
       branch.merge = remote_ref
-      rp.work_git.update_ref('refs/heads/default', rev)
+      rp.work_git.reset('--hard', rev)
       branch.Save()
 
     if opt.worktree:

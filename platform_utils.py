@@ -1,5 +1,3 @@
-# -*- coding:utf-8 -*-
-#
 # Copyright (C) 2016 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,16 +15,10 @@
 import errno
 import os
 import platform
+from queue import Queue
 import select
 import shutil
 import stat
-
-from pyversion import is_python3
-if is_python3():
-  from queue import Queue
-else:
-  from Queue import Queue
-
 from threading import Thread
 
 
