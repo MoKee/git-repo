@@ -221,6 +221,88 @@ class XmlManifestTests(unittest.TestCase):
     self.assertEqual(manifest.repo_hooks_project.name, 'repohooks')
     self.assertEqual(manifest.repo_hooks_project.enabled_repo_hooks, ['a', 'b'])
 
+  def test_superproject(self):
+    """Check superproject settings."""
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="test-remote" fetch="http://localhost" />
+  <default remote="test-remote" revision="refs/heads/main" />
+  <superproject name="superproject"/>
+</manifest>
+""")
+    self.assertEqual(manifest.superproject['name'], 'superproject')
+    self.assertEqual(manifest.superproject['remote'].name, 'test-remote')
+    self.assertEqual(manifest.superproject['remote'].url, 'http://localhost/superproject')
+    self.assertEqual(
+        manifest.ToXml().toxml(),
+        '<?xml version="1.0" ?><manifest>' +
+        '<remote name="test-remote" fetch="http://localhost"/>' +
+        '<default remote="test-remote" revision="refs/heads/main"/>' +
+        '<superproject name="superproject"/>' +
+        '</manifest>')
+
+  def test_superproject_with_remote(self):
+    """Check superproject settings."""
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="default-remote" fetch="http://localhost" />
+  <remote name="superproject-remote" fetch="http://localhost" />
+  <default remote="default-remote" revision="refs/heads/main" />
+  <superproject name="platform/superproject" remote="superproject-remote"/>
+</manifest>
+""")
+    self.assertEqual(manifest.superproject['name'], 'platform/superproject')
+    self.assertEqual(manifest.superproject['remote'].name, 'superproject-remote')
+    self.assertEqual(manifest.superproject['remote'].url, 'http://localhost/platform/superproject')
+    self.assertEqual(
+        manifest.ToXml().toxml(),
+        '<?xml version="1.0" ?><manifest>' +
+        '<remote name="default-remote" fetch="http://localhost"/>' +
+        '<remote name="superproject-remote" fetch="http://localhost"/>' +
+        '<default remote="default-remote" revision="refs/heads/main"/>' +
+        '<superproject name="platform/superproject" remote="superproject-remote"/>' +
+        '</manifest>')
+
+  def test_superproject_with_defalut_remote(self):
+    """Check superproject settings."""
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="default-remote" fetch="http://localhost" />
+  <default remote="default-remote" revision="refs/heads/main" />
+  <superproject name="superproject" remote="default-remote"/>
+</manifest>
+""")
+    self.assertEqual(manifest.superproject['name'], 'superproject')
+    self.assertEqual(manifest.superproject['remote'].name, 'default-remote')
+    self.assertEqual(
+        manifest.ToXml().toxml(),
+        '<?xml version="1.0" ?><manifest>' +
+        '<remote name="default-remote" fetch="http://localhost"/>' +
+        '<default remote="default-remote" revision="refs/heads/main"/>' +
+        '<superproject name="superproject"/>' +
+        '</manifest>')
+
+  def test_unknown_tags(self):
+    """Check superproject settings."""
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="test-remote" fetch="http://localhost" />
+  <default remote="test-remote" revision="refs/heads/main" />
+  <superproject name="superproject"/>
+  <iankaz value="unknown (possible) future tags are ignored"/>
+  <x-custom-tag>X tags are always ignored</x-custom-tag>
+</manifest>
+""")
+    self.assertEqual(manifest.superproject['name'], 'superproject')
+    self.assertEqual(manifest.superproject['remote'].name, 'test-remote')
+    self.assertEqual(
+        manifest.ToXml().toxml(),
+        '<?xml version="1.0" ?><manifest>' +
+        '<remote name="test-remote" fetch="http://localhost"/>' +
+        '<default remote="test-remote" revision="refs/heads/main"/>' +
+        '<superproject name="superproject"/>' +
+        '</manifest>')
+
   def test_project_group(self):
     """Check project group settings."""
     manifest = self.getXmlManifest("""
