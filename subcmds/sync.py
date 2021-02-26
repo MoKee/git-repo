@@ -56,7 +56,7 @@ import gitc_utils
 from project import Project
 from project import RemoteSpec
 from command import Command, MirrorSafeCommand
-from error import BUG_REPORT_URL, RepoChangedException, GitError, ManifestParseError
+from error import RepoChangedException, GitError, ManifestParseError
 import platform_utils
 from project import SyncBuffer
 from progress import Progress
@@ -270,6 +270,42 @@ later is required to fix a server side protocol bug.
     g.add_option('--repo-upgraded',
                  dest='repo_upgraded', action='store_true',
                  help=SUPPRESS_HELP)
+
+  def _GetBranch(self):
+    """Returns the branch name for getting the approved manifest."""
+    p = self.manifest.manifestProject
+    b = p.GetBranch(p.CurrentBranch)
+    branch = b.merge
+    if branch.startswith(R_HEADS):
+      branch = branch[len(R_HEADS):]
+    return branch
+
+  def _UpdateProjectsRevisionId(self, opt, args):
+    """Update revisionId of every project with the SHA from superproject.
+
+    This function updates each project's revisionId with SHA from superproject.
+    It writes the updated manifest into a file and reloads the manifest from it.
+
+    Args:
+      opt: Program options returned from optparse.  See _Options().
+      args: Arguments to pass to GetProjects. See the GetProjects
+          docstring for details.
+
+    Returns:
+      Returns path to the overriding manifest file.
+    """
+    superproject = git_superproject.Superproject(self.manifest,
+                                                 self.repodir)
+    all_projects = self.GetProjects(args,
+                                    missing_ok=True,
+                                    submodules_ok=opt.fetch_submodules)
+    manifest_path = superproject.UpdateProjectsRevisionId(all_projects)
+    if not manifest_path:
+      print('error: Update of revsionId from superproject has failed',
+            file=sys.stderr)
+      sys.exit(1)
+    self._ReloadManifest(manifest_path)
+    return manifest_path
 
   def _FetchProjectList(self, opt, projects, sem, *args, **kwargs):
     """Main function of the fetch threads.
@@ -563,8 +599,9 @@ later is required to fix a server side protocol bug.
       # Make sure pruning never kicks in with shared projects.
       if (not project.use_git_worktrees and
               len(project.manifest.GetProjectsWithName(project.name)) > 1):
-        print('%s: Shared project %s found, disabling pruning.' %
-              (project.relpath, project.name))
+        if not opt.quiet:
+          print('%s: Shared project %s found, disabling pruning.' %
+                (project.relpath, project.name))
         if git_require((2, 7, 0)):
           project.EnableRepositoryExtension('preciousObjects')
         else:
@@ -629,7 +666,7 @@ later is required to fix a server side protocol bug.
       if project.relpath:
         new_project_paths.append(project.relpath)
     file_name = 'project.list'
-    file_path = os.path.join(self.manifest.repodir, file_name)
+    file_path = os.path.join(self.repodir, file_name)
     old_project_paths = []
 
     if os.path.exists(file_path):
@@ -713,11 +750,7 @@ later is required to fix a server side protocol bug.
     try:
       server = xmlrpc.client.Server(manifest_server, transport=transport)
       if opt.smart_sync:
-        p = self.manifest.manifestProject
-        b = p.GetBranch(p.CurrentBranch)
-        branch = b.merge
-        if branch.startswith(R_HEADS):
-          branch = branch[len(R_HEADS):]
+        branch = self._GetBranch()
 
         if 'SYNC_TARGET' in os.environ:
           target = os.environ['SYNC_TARGET']
@@ -860,6 +893,9 @@ later is required to fix a server side protocol bug.
     else:
       self._UpdateManifestProject(opt, mp, manifest_name)
 
+    if opt.use_superproject:
+      manifest_name = self._UpdateProjectsRevisionId(opt, args)
+
     if self.gitc_manifest:
       gitc_manifest_projects = self.GetProjects(args,
                                                 missing_ok=True)
@@ -898,41 +934,6 @@ later is required to fix a server side protocol bug.
     all_projects = self.GetProjects(args,
                                     missing_ok=True,
                                     submodules_ok=opt.fetch_submodules)
-
-    if opt.use_superproject:
-      if not self.manifest.superproject:
-        print('error: superproject tag is not defined in manifest.xml',
-              file=sys.stderr)
-        sys.exit(1)
-      print('WARNING: --use-superproject is experimental and not '
-            'for general use', file=sys.stderr)
-      superproject_url = self.manifest.superproject['remote'].url
-      if not superproject_url:
-        print('error: superproject URL is not defined in manifest.xml',
-              file=sys.stderr)
-        sys.exit(1)
-      superproject = git_superproject.Superproject(self.manifest.repodir)
-      try:
-        superproject_shas = superproject.GetAllProjectsSHAs(url=superproject_url)
-      except Exception as e:
-        print('error: Cannot get project SHAs for %s: %s: %s' %
-              (superproject_url, type(e).__name__, str(e)),
-              file=sys.stderr)
-        sys.exit(1)
-      projects_missing_shas = []
-      for project in all_projects:
-        path = project.relpath
-        if not path:
-          continue
-        sha = superproject_shas.get(path)
-        if sha:
-          project.SetRevisionId(sha)
-        else:
-          projects_missing_shas.append(path)
-      if projects_missing_shas:
-        print('error: please file a bug using %s to report missing shas for: %s' %
-              (BUG_REPORT_URL, projects_missing_shas), file=sys.stderr)
-        sys.exit(1)
 
     err_network_sync = False
     err_update_projects = False

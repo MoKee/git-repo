@@ -438,6 +438,7 @@ class RemoteSpec(object):
     self.orig_name = orig_name
     self.fetchUrl = fetchUrl
 
+
 class Project(object):
   # These objects can be shared between several working trees.
   shareable_files = ['description', 'info']
@@ -1927,7 +1928,8 @@ class Project(object):
     try:
       # if revision (sha or tag) is not present then following function
       # throws an error.
-      self.bare_git.rev_parse('--verify', '%s^0' % self.revisionExpr)
+      self.bare_git.rev_list('-1', '--missing=allow-any',
+                             '%s^0' % self.revisionExpr, '--')
       return True
     except GitError:
       # There is no such persistent revision. We have to fetch it.
@@ -2470,10 +2472,7 @@ class Project(object):
             self.config.SetString(key, m.GetString(key))
         self.config.SetString('filter.lfs.smudge', 'git-lfs smudge --skip -- %f')
         self.config.SetString('filter.lfs.process', 'git-lfs filter-process --skip')
-        if self.manifest.IsMirror:
-          self.config.SetString('core.bare', 'true')
-        else:
-          self.config.SetString('core.bare', None)
+        self.config.SetBoolean('core.bare', True if self.manifest.IsMirror else None)
     except Exception:
       if init_obj_dir and os.path.exists(self.objdir):
         platform_utils.rmtree(self.objdir)

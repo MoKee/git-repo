@@ -25,6 +25,7 @@ from error import ManifestParseError
 from project import SyncBuffer
 from git_config import GitConfig
 from git_command import git_require, MIN_GIT_VERSION_SOFT, MIN_GIT_VERSION_HARD
+import git_superproject
 import platform_utils
 from wrapper import Wrapper
 
@@ -134,6 +135,11 @@ to update the working directory files.
     g.add_option('--submodules',
                  dest='submodules', action='store_true',
                  help='sync any submodules associated with the manifest repo')
+    g.add_option('--use-superproject', action='store_true',
+                 help='use the manifest superproject to sync projects')
+    g.add_option('--no-use-superproject', action='store_false',
+                 dest='use_superproject',
+                 help='disable use of manifest superprojects')
     g.add_option('-g', '--groups',
                  dest='groups', default='default',
                  help='restrict manifest projects to ones with specified '
@@ -175,6 +181,14 @@ to update the working directory files.
   def _RegisteredEnvironmentOptions(self):
     return {'REPO_MANIFEST_URL': 'manifest_url',
             'REPO_MIRROR_LOCATION': 'reference'}
+
+  def _CloneSuperproject(self):
+    """Clone the superproject based on the superproject's url and branch."""
+    superproject = git_superproject.Superproject(self.manifest,
+                                                 self.repodir)
+    if not superproject.Sync():
+      print('error: git update of superproject failed', file=sys.stderr)
+      sys.exit(1)
 
   def _SyncManifest(self, opt):
     m = self.manifest.manifestProject
@@ -250,7 +264,7 @@ to update the working directory files.
       m.config.SetString('repo.reference', opt.reference)
 
     if opt.dissociate:
-      m.config.SetString('repo.dissociate', 'true')
+      m.config.SetBoolean('repo.dissociate', opt.dissociate)
 
     if opt.worktree:
       if opt.mirror:
@@ -261,14 +275,14 @@ to update the working directory files.
         print('fatal: --submodules and --worktree are incompatible',
               file=sys.stderr)
         sys.exit(1)
-      m.config.SetString('repo.worktree', 'true')
+      m.config.SetBoolean('repo.worktree', opt.worktree)
       if is_new:
         m.use_git_worktrees = True
       print('warning: --worktree is experimental!', file=sys.stderr)
 
     if opt.archive:
       if is_new:
-        m.config.SetString('repo.archive', 'true')
+        m.config.SetBoolean('repo.archive', opt.archive)
       else:
         print('fatal: --archive is only supported when initializing a new '
               'workspace.', file=sys.stderr)
@@ -278,7 +292,7 @@ to update the working directory files.
 
     if opt.mirror:
       if is_new:
-        m.config.SetString('repo.mirror', 'true')
+        m.config.SetBoolean('repo.mirror', opt.mirror)
       else:
         print('fatal: --mirror is only supported when initializing a new '
               'workspace.', file=sys.stderr)
@@ -291,7 +305,7 @@ to update the working directory files.
         print('fatal: --mirror and --partial-clone are mutually exclusive',
               file=sys.stderr)
         sys.exit(1)
-      m.config.SetString('repo.partialclone', 'true')
+      m.config.SetBoolean('repo.partialclone', opt.partial_clone)
       if opt.clone_filter:
         m.config.SetString('repo.clonefilter', opt.clone_filter)
     else:
@@ -300,10 +314,13 @@ to update the working directory files.
     if opt.clone_bundle is None:
       opt.clone_bundle = False if opt.partial_clone else True
     else:
-      m.config.SetString('repo.clonebundle', 'true' if opt.clone_bundle else 'false')
+      m.config.SetBoolean('repo.clonebundle', opt.clone_bundle)
 
     if opt.submodules:
-      m.config.SetString('repo.submodules', 'true')
+      m.config.SetBoolean('repo.submodules', opt.submodules)
+
+    if opt.use_superproject is not None:
+      m.config.SetBoolean('repo.superproject', opt.use_superproject)
 
     if not m.Sync_NetworkHalf(is_new=is_new, quiet=opt.quiet, verbose=opt.verbose,
                               clone_bundle=opt.clone_bundle,
@@ -518,6 +535,9 @@ to update the working directory files.
 
     self._SyncManifest(opt)
     self._LinkManifest(opt.manifest_name)
+
+    if self.manifest.manifestProject.config.GetBoolean('repo.superproject'):
+      self._CloneSuperproject()
 
     if os.isatty(0) and os.isatty(1) and not self.manifest.IsMirror:
       if opt.config_name or self._ShouldConfigureUser(opt):

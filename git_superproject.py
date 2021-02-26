@@ -12,60 +12,85 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Provide functionality to get all projects and their SHAs from Superproject.
+"""Provide functionality to get all projects and their commit ids from Superproject.
 
 For more information on superproject, check out:
 https://en.wikibooks.org/wiki/Git/Submodules_and_Superprojects
 
 Examples:
   superproject = Superproject()
-  project_shas = superproject.GetAllProjectsSHAs()
+  project_commit_ids = superproject.UpdateProjectsRevisionId(projects)
 """
 
 import os
 import sys
 
-from error import GitError
+from error import BUG_REPORT_URL
 from git_command import GitCommand
+from git_refs import R_HEADS
 import platform_utils
+
+_SUPERPROJECT_GIT_NAME = 'superproject.git'
+_SUPERPROJECT_MANIFEST_NAME = 'superproject_override.xml'
 
 
 class Superproject(object):
-  """Get SHAs from superproject.
+  """Get commit ids from superproject.
 
-  It does a 'git clone' of superproject and 'git ls-tree' to get list of SHAs for all projects.
-  It contains project_shas which is a dictionary with project/sha entries.
+  It does a 'git clone' of superproject and 'git ls-tree' to get list of commit ids
+  for all projects. It contains project_commit_ids which is a dictionary with
+  project/commit id entries.
   """
-  def __init__(self, repodir, superproject_dir='exp-superproject'):
+  def __init__(self, manifest, repodir, superproject_dir='exp-superproject'):
     """Initializes superproject.
 
     Args:
+      manifest: A Manifest object that is to be written to a file.
       repodir: Path to the .repo/ dir for holding all internal checkout state.
+          It must be in the top directory of the repo client checkout.
       superproject_dir: Relative path under |repodir| to checkout superproject.
     """
-    self._project_shas = None
+    self._project_commit_ids = None
+    self._manifest = manifest
+    self._branch = self._GetBranch()
     self._repodir = os.path.abspath(repodir)
     self._superproject_dir = superproject_dir
     self._superproject_path = os.path.join(self._repodir, superproject_dir)
+    self._manifest_path = os.path.join(self._superproject_path,
+                                       _SUPERPROJECT_MANIFEST_NAME)
+    self._work_git = os.path.join(self._superproject_path,
+                                  _SUPERPROJECT_GIT_NAME)
 
   @property
-  def project_shas(self):
-    """Returns a dictionary of projects and their SHAs."""
-    return self._project_shas
+  def project_commit_ids(self):
+    """Returns a dictionary of projects and their commit ids."""
+    return self._project_commit_ids
 
-  def _Clone(self, url, branch=None):
-    """Do a 'git clone' for the given url and branch.
+  def _GetBranch(self):
+    """Returns the branch name for getting the approved manifest."""
+    p = self._manifest.manifestProject
+    b = p.GetBranch(p.CurrentBranch)
+    if not b:
+      return None
+    branch = b.merge
+    if branch and branch.startswith(R_HEADS):
+      branch = branch[len(R_HEADS):]
+    return branch
+
+  def _Clone(self, url):
+    """Do a 'git clone' for the given url.
 
     Args:
       url: superproject's url to be passed to git clone.
-      branch: the branchname to be passed as argument to git clone.
 
     Returns:
-      True if 'git clone <url> <branch>' is successful, or False.
+      True if git clone is successful, or False.
     """
-    cmd = ['clone', url, '--depth', '1']
-    if branch:
-      cmd += ['--branch', branch]
+    if not os.path.exists(self._superproject_path):
+      os.mkdir(self._superproject_path)
+    cmd = ['clone', url, '--filter', 'blob:none', '--bare']
+    if self._branch:
+      cmd += ['--branch', self._branch]
     p = GitCommand(None,
                    cmd,
                    cwd=self._superproject_path,
@@ -80,22 +105,48 @@ class Superproject(object):
       return False
     return True
 
+  def _Fetch(self):
+    """Do a 'git fetch' to to fetch the latest content.
+
+    Returns:
+      True if 'git fetch' is successful, or False.
+    """
+    if not os.path.exists(self._work_git):
+      print('git fetch missing drectory: %s' % self._work_git,
+            file=sys.stderr)
+      return False
+    cmd = ['fetch', 'origin', '+refs/heads/*:refs/heads/*', '--prune']
+    p = GitCommand(None,
+                   cmd,
+                   cwd=self._work_git,
+                   capture_stdout=True,
+                   capture_stderr=True)
+    retval = p.Wait()
+    if retval:
+      print('repo: error: git fetch call failed with return code: %r, stderr: %r' %
+            (retval, p.stderr), file=sys.stderr)
+      return False
+    return True
+
   def _LsTree(self):
-    """Returns the data from 'git ls-tree -r HEAD'.
+    """Returns the data from 'git ls-tree ...'.
 
     Works only in git repositories.
 
     Returns:
-      data: data returned from 'git ls-tree -r HEAD' instead of None.
+      data: data returned from 'git ls-tree ...' instead of None.
     """
-    git_dir = os.path.join(self._superproject_path, 'superproject')
-    if not os.path.exists(git_dir):
-      raise GitError('git ls-tree. Missing drectory: %s' % git_dir)
+    if not os.path.exists(self._work_git):
+      print('git ls-tree missing drectory: %s' % self._work_git,
+            file=sys.stderr)
+      return None
     data = None
-    cmd = ['ls-tree', '-z', '-r', 'HEAD']
+    branch = 'HEAD' if not self._branch else self._branch
+    cmd = ['ls-tree', '-z', '-r', branch]
+
     p = GitCommand(None,
                    cmd,
-                   cwd=git_dir,
+                   cwd=self._work_git,
                    capture_stdout=True,
                    capture_stderr=True)
     retval = p.Wait()
@@ -108,42 +159,120 @@ class Superproject(object):
           retval, p.stderr), file=sys.stderr)
     return data
 
-  def GetAllProjectsSHAs(self, url, branch=None):
-    """Get SHAs for all projects from superproject and save them in _project_shas.
-
-    Args:
-      url: superproject's url to be passed to git clone.
-      branch: the branchname to be passed as argument to git clone.
+  def Sync(self):
+    """Sync superproject either by git clone/fetch.
 
     Returns:
-      A dictionary with the projects/SHAs instead of None.
+      True if sync of superproject is successful, or False.
     """
-    if not url:
-      raise ValueError('url argument is not supplied.')
-    if os.path.exists(self._superproject_path):
-      platform_utils.rmtree(self._superproject_path)
-    os.mkdir(self._superproject_path)
+    print('WARNING: --use-superproject is experimental and not '
+          'for general use', file=sys.stderr)
 
-    # TODO(rtenneti): we shouldn't be cloning the repo from scratch every time.
-    if not self._Clone(url, branch):
-      raise GitError('git clone failed for url: %s' % url)
+    if not self._manifest.superproject:
+      print('error: superproject tag is not defined in manifest',
+            file=sys.stderr)
+      return False
+
+    url = self._manifest.superproject['remote'].url
+    if not url:
+      print('error: superproject URL is not defined in manifest',
+            file=sys.stderr)
+      return False
+
+    do_clone = True
+    if os.path.exists(self._superproject_path):
+      if not self._Fetch():
+        # If fetch fails due to a corrupted git directory, then do a git clone.
+        platform_utils.rmtree(self._superproject_path)
+      else:
+        do_clone = False
+    if do_clone:
+      if not self._Clone(url):
+        print('error: git clone failed for url: %s' % url, file=sys.stderr)
+        return False
+    return True
+
+  def _GetAllProjectsCommitIds(self):
+    """Get commit ids for all projects from superproject and save them in _project_commit_ids.
+
+    Returns:
+      A dictionary with the projects/commit ids on success, otherwise None.
+    """
+    if not self.Sync():
+      return None
 
     data = self._LsTree()
     if not data:
-      raise GitError('git ls-tree failed for url: %s' % url)
+      print('error: git ls-tree failed for superproject', file=sys.stderr)
+      return None
 
     # Parse lines like the following to select lines starting with '160000' and
-    # build a dictionary with project path (last element) and its SHA (3rd element).
+    # build a dictionary with project path (last element) and its commit id (3rd element).
     #
     # 160000 commit 2c2724cb36cd5a9cec6c852c681efc3b7c6b86ea\tart\x00
     # 120000 blob acc2cbdf438f9d2141f0ae424cec1d8fc4b5d97f\tbootstrap.bash\x00
-    shas = {}
+    commit_ids = {}
     for line in data.split('\x00'):
       ls_data = line.split(None, 3)
       if not ls_data:
         break
       if ls_data[0] == '160000':
-        shas[ls_data[3]] = ls_data[2]
+        commit_ids[ls_data[3]] = ls_data[2]
 
-    self._project_shas = shas
-    return shas
+    self._project_commit_ids = commit_ids
+    return commit_ids
+
+  def _WriteManfiestFile(self):
+    """Writes manifest to a file.
+
+    Returns:
+      manifest_path: Path name of the file into which manifest is written instead of None.
+    """
+    if not os.path.exists(self._superproject_path):
+      print('error: missing superproject directory %s' %
+            self._superproject_path,
+            file=sys.stderr)
+      return None
+    manifest_str = self._manifest.ToXml().toxml()
+    manifest_path = self._manifest_path
+    try:
+      with open(manifest_path, 'w', encoding='utf-8') as fp:
+        fp.write(manifest_str)
+    except IOError as e:
+      print('error: cannot write manifest to %s:\n%s'
+            % (manifest_path, e),
+            file=sys.stderr)
+      return None
+    return manifest_path
+
+  def UpdateProjectsRevisionId(self, projects):
+    """Update revisionId of every project in projects with the commit id.
+
+    Args:
+      projects: List of projects whose revisionId needs to be updated.
+
+    Returns:
+      manifest_path: Path name of the overriding manfiest file instead of None.
+    """
+    commit_ids = self._GetAllProjectsCommitIds()
+    if not commit_ids:
+      print('error: Cannot get project commit ids from manifest', file=sys.stderr)
+      return None
+
+    projects_missing_commit_ids = []
+    for project in projects:
+      path = project.relpath
+      if not path:
+        continue
+      commit_id = commit_ids.get(path)
+      if commit_id:
+        project.SetRevisionId(commit_id)
+      else:
+        projects_missing_commit_ids.append(path)
+    if projects_missing_commit_ids:
+      print('error: please file a bug using %s to report missing commit_ids for: %s' %
+            (BUG_REPORT_URL, projects_missing_commit_ids), file=sys.stderr)
+      return None
+
+    manifest_path = self._WriteManfiestFile()
+    return manifest_path

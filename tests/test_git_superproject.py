@@ -19,8 +19,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from error import GitError
 import git_superproject
+import manifest_xml
 import platform_utils
 
 
@@ -31,37 +31,85 @@ class SuperprojectTestCase(unittest.TestCase):
     """Set up superproject every time."""
     self.tempdir = tempfile.mkdtemp(prefix='repo_tests')
     self.repodir = os.path.join(self.tempdir, '.repo')
+    self.manifest_file = os.path.join(
+        self.repodir, manifest_xml.MANIFEST_FILE_NAME)
     os.mkdir(self.repodir)
-    self._superproject = git_superproject.Superproject(self.repodir)
+
+    # The manifest parsing really wants a git repo currently.
+    gitdir = os.path.join(self.repodir, 'manifests.git')
+    os.mkdir(gitdir)
+    with open(os.path.join(gitdir, 'config'), 'w') as fp:
+      fp.write("""[remote "origin"]
+        url = https://localhost:0/manifest
+""")
+
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="default-remote" fetch="http://localhost" />
+  <default remote="default-remote" revision="refs/heads/main" />
+  <superproject name="superproject"/>
+  <project path="art" name="platform/art" />
+</manifest>
+""")
+    self._superproject = git_superproject.Superproject(manifest, self.repodir)
 
   def tearDown(self):
     """Tear down superproject every time."""
     platform_utils.rmtree(self.tempdir)
 
-  def test_superproject_get_project_shas_no_url(self):
+  def getXmlManifest(self, data):
+    """Helper to initialize a manifest for testing."""
+    with open(self.manifest_file, 'w') as fp:
+      fp.write(data)
+    return manifest_xml.XmlManifest(self.repodir, self.manifest_file)
+
+  def test_superproject_get_superproject_no_superproject(self):
     """Test with no url."""
-    with self.assertRaises(ValueError):
-      self._superproject.GetAllProjectsSHAs(url=None)
+    manifest = self.getXmlManifest("""
+<manifest>
+</manifest>
+""")
+    superproject = git_superproject.Superproject(manifest, self.repodir)
+    self.assertFalse(superproject.Sync())
 
-  def test_superproject_get_project_shas_invalid_url(self):
+  def test_superproject_get_superproject_invalid_url(self):
     """Test with an invalid url."""
-    with self.assertRaises(GitError):
-      self._superproject.GetAllProjectsSHAs(url='localhost')
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="test-remote" fetch="localhost" />
+  <default remote="test-remote" revision="refs/heads/main" />
+  <superproject name="superproject"/>
+</manifest>
+""")
+    superproject = git_superproject.Superproject(manifest, self.repodir)
+    self.assertFalse(superproject.Sync())
 
-  def test_superproject_get_project_shas_invalid_branch(self):
+  def test_superproject_get_superproject_invalid_branch(self):
     """Test with an invalid branch."""
-    with self.assertRaises(GitError):
-      self._superproject.GetAllProjectsSHAs(
-          url='sso://android/platform/superproject',
-          branch='junk')
+    manifest = self.getXmlManifest("""
+<manifest>
+  <remote name="test-remote" fetch="localhost" />
+  <default remote="test-remote" revision="refs/heads/main" />
+  <superproject name="superproject"/>
+</manifest>
+""")
+    superproject = git_superproject.Superproject(manifest, self.repodir)
+    with mock.patch.object(self._superproject, '_GetBranch', return_value='junk'):
+      self.assertFalse(superproject.Sync())
 
-  def test_superproject_get_project_shas_mock_clone(self):
+  def test_superproject_get_superproject_mock_clone(self):
     """Test with _Clone failing."""
-    with self.assertRaises(GitError):
-      with mock.patch.object(self._superproject, '_Clone', return_value=False):
-        self._superproject.GetAllProjectsSHAs(url='localhost')
+    with mock.patch.object(self._superproject, '_Clone', return_value=False):
+      self.assertFalse(self._superproject.Sync())
 
-  def test_superproject_get_project_shas_mock_ls_tree(self):
+  def test_superproject_get_superproject_mock_fetch(self):
+    """Test with _Fetch failing and _clone being called."""
+    with mock.patch.object(self._superproject, '_Clone', return_value=True):
+      os.mkdir(self._superproject._superproject_path)
+      with mock.patch.object(self._superproject, '_Fetch', return_value=False):
+        self.assertTrue(self._superproject.Sync())
+
+  def test_superproject_get_all_project_commit_ids_mock_ls_tree(self):
     """Test with LsTree being a mock."""
     data = ('120000 blob 158258bdf146f159218e2b90f8b699c4d85b5804\tAndroid.bp\x00'
             '160000 commit 2c2724cb36cd5a9cec6c852c681efc3b7c6b86ea\tart\x00'
@@ -70,12 +118,59 @@ class SuperprojectTestCase(unittest.TestCase):
             '160000 commit ade9b7a0d874e25fff4bf2552488825c6f111928\tbuild/bazel\x00')
     with mock.patch.object(self._superproject, '_Clone', return_value=True):
       with mock.patch.object(self._superproject, '_LsTree', return_value=data):
-        shas = self._superproject.GetAllProjectsSHAs(url='localhost', branch='junk')
-        self.assertEqual(shas, {
+        commit_ids = self._superproject._GetAllProjectsCommitIds()
+        self.assertEqual(commit_ids, {
             'art': '2c2724cb36cd5a9cec6c852c681efc3b7c6b86ea',
             'bootable/recovery': 'e9d25da64d8d365dbba7c8ee00fe8c4473fe9a06',
             'build/bazel': 'ade9b7a0d874e25fff4bf2552488825c6f111928'
         })
+
+  def test_superproject_write_manifest_file(self):
+    """Test with writing manifest to a file after setting revisionId."""
+    self.assertEqual(len(self._superproject._manifest.projects), 1)
+    project = self._superproject._manifest.projects[0]
+    project.SetRevisionId('ABCDEF')
+    # Create temporary directory so that it can write the file.
+    os.mkdir(self._superproject._superproject_path)
+    manifest_path = self._superproject._WriteManfiestFile()
+    self.assertIsNotNone(manifest_path)
+    with open(manifest_path, 'r') as fp:
+      manifest_xml = fp.read()
+    self.assertEqual(
+        manifest_xml,
+        '<?xml version="1.0" ?><manifest>' +
+        '<remote name="default-remote" fetch="http://localhost"/>' +
+        '<default remote="default-remote" revision="refs/heads/main"/>' +
+        '<project name="platform/art" path="art" revision="ABCDEF"/>' +
+        '<superproject name="superproject"/>' +
+        '</manifest>')
+
+  def test_superproject_update_project_revision_id(self):
+    """Test with LsTree being a mock."""
+    self.assertEqual(len(self._superproject._manifest.projects), 1)
+    projects = self._superproject._manifest.projects
+    data = ('160000 commit 2c2724cb36cd5a9cec6c852c681efc3b7c6b86ea\tart\x00'
+            '160000 commit e9d25da64d8d365dbba7c8ee00fe8c4473fe9a06\tbootable/recovery\x00')
+    with mock.patch.object(self._superproject, '_Clone', return_value=True):
+      with mock.patch.object(self._superproject, '_Fetch', return_value=True):
+        with mock.patch.object(self._superproject,
+                               '_LsTree',
+                               return_value=data):
+          # Create temporary directory so that it can write the file.
+          os.mkdir(self._superproject._superproject_path)
+          manifest_path = self._superproject.UpdateProjectsRevisionId(projects)
+          self.assertIsNotNone(manifest_path)
+          with open(manifest_path, 'r') as fp:
+            manifest_xml = fp.read()
+          self.assertEqual(
+              manifest_xml,
+              '<?xml version="1.0" ?><manifest>' +
+              '<remote name="default-remote" fetch="http://localhost"/>' +
+              '<default remote="default-remote" revision="refs/heads/main"/>' +
+              '<project name="platform/art" path="art" ' +
+              'revision="2c2724cb36cd5a9cec6c852c681efc3b7c6b86ea"/>' +
+              '<superproject name="superproject"/>' +
+              '</manifest>')
 
 
 if __name__ == '__main__':
