@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import errno
+import functools
+import io
 import multiprocessing
 import re
 import os
@@ -21,8 +23,7 @@ import sys
 import subprocess
 
 from color import Coloring
-from command import Command, MirrorSafeCommand
-import platform_utils
+from command import DEFAULT_LOCAL_JOBS, Command, MirrorSafeCommand, WORKER_BATCH_SIZE
 
 _CAN_COLOR = [
     'branch',
@@ -113,12 +114,17 @@ terminal and are not redirected.
 If -e is used, when a command exits unsuccessfully, '%prog' will abort
 without iterating through the remaining projects.
 """
+  PARALLEL_JOBS = DEFAULT_LOCAL_JOBS
+
+  @staticmethod
+  def _cmd_option(option, _opt_str, _value, parser):
+    setattr(parser.values, option.dest, list(parser.rargs))
+    while parser.rargs:
+      del parser.rargs[0]
 
   def _Options(self, p):
-    def cmd(option, opt_str, value, parser):
-      setattr(parser.values, option.dest, list(parser.rargs))
-      while parser.rargs:
-        del parser.rargs[0]
+    super()._Options(p)
+
     p.add_option('-r', '--regex',
                  dest='regex', action='store_true',
                  help="Execute the command only on projects matching regex or wildcard expression")
@@ -133,7 +139,7 @@ without iterating through the remaining projects.
                  help='Command (and arguments) to execute',
                  dest='command',
                  action='callback',
-                 callback=cmd)
+                 callback=self._cmd_option)
     p.add_option('-e', '--abort-on-errors',
                  dest='abort_on_errors', action='store_true',
                  help='Abort if a command exits unsuccessfully')
@@ -148,37 +154,9 @@ without iterating through the remaining projects.
     g.add_option('-v', '--verbose',
                  dest='verbose', action='store_true',
                  help='Show command error messages')
-    g.add_option('-j', '--jobs',
-                 dest='jobs', action='store', type='int', default=1,
-                 help='number of commands to execute simultaneously')
 
   def WantPager(self, opt):
     return opt.project_header and opt.jobs == 1
-
-  def _SerializeProject(self, project):
-    """ Serialize a project._GitGetByExec instance.
-
-    project._GitGetByExec is not pickle-able. Instead of trying to pass it
-    around between processes, make a dict ourselves containing only the
-    attributes that we need.
-
-    """
-    if not self.manifest.IsMirror:
-      lrev = project.GetRevisionId()
-    else:
-      lrev = None
-    return {
-        'name': project.name,
-        'relpath': project.relpath,
-        'remote_name': project.remote.name,
-        'lrev': lrev,
-        'rrev': project.revisionExpr,
-        'annotations': dict((a.name, a.value) for a in project.annotations),
-        'gitdir': project.gitdir,
-        'worktree': project.worktree,
-        'upstream': project.upstream,
-        'dest_branch': project.dest_branch,
-    }
 
   def ValidateOptions(self, opt, args):
     if not opt.command:
@@ -234,60 +212,50 @@ without iterating through the remaining projects.
 
     os.environ['REPO_COUNT'] = str(len(projects))
 
-    pool = multiprocessing.Pool(opt.jobs, InitWorker)
     try:
       config = self.manifest.manifestProject.config
-      results_it = pool.imap(
-          DoWorkWrapper,
-          self.ProjectArgs(projects, mirror, opt, cmd, shell, config))
-      pool.close()
-      for r in results_it:
-        rc = rc or r
-        if r != 0 and opt.abort_on_errors:
-          raise Exception('Aborting due to previous error')
+      with multiprocessing.Pool(opt.jobs, InitWorker) as pool:
+        results_it = pool.imap(
+            functools.partial(DoWorkWrapper, mirror, opt, cmd, shell, config),
+            enumerate(projects),
+            chunksize=WORKER_BATCH_SIZE)
+        first = True
+        for (r, output) in results_it:
+          if output:
+            if first:
+              first = False
+            elif opt.project_header:
+              print()
+            # To simplify the DoWorkWrapper, take care of automatic newlines.
+            end = '\n'
+            if output[-1] == '\n':
+              end = ''
+            print(output, end=end)
+          rc = rc or r
+          if r != 0 and opt.abort_on_errors:
+            raise Exception('Aborting due to previous error')
     except (KeyboardInterrupt, WorkerKeyboardInterrupt):
       # Catch KeyboardInterrupt raised inside and outside of workers
-      print('Interrupted - terminating the pool')
-      pool.terminate()
       rc = rc or errno.EINTR
     except Exception as e:
       # Catch any other exceptions raised
       print('Got an error, terminating the pool: %s: %s' %
             (type(e).__name__, e),
             file=sys.stderr)
-      pool.terminate()
       rc = rc or getattr(e, 'errno', 1)
-    finally:
-      pool.join()
     if rc != 0:
       sys.exit(rc)
-
-  def ProjectArgs(self, projects, mirror, opt, cmd, shell, config):
-    for cnt, p in enumerate(projects):
-      try:
-        project = self._SerializeProject(p)
-      except Exception as e:
-        print('Project list error on project %s: %s: %s' %
-              (p.name, type(e).__name__, e),
-              file=sys.stderr)
-        return
-      except KeyboardInterrupt:
-        print('Project list interrupted',
-              file=sys.stderr)
-        return
-      yield [mirror, opt, cmd, shell, cnt, config, project]
 
 
 class WorkerKeyboardInterrupt(Exception):
   """ Keyboard interrupt exception for worker processes. """
-  pass
 
 
 def InitWorker():
   signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def DoWorkWrapper(args):
+def DoWorkWrapper(mirror, opt, cmd, shell, config, args):
   """ A wrapper around the DoWork() method.
 
   Catch the KeyboardInterrupt exceptions here and re-raise them as a different,
@@ -295,11 +263,11 @@ def DoWorkWrapper(args):
   and making the parent hang indefinitely.
 
   """
-  project = args.pop()
+  cnt, project = args
   try:
-    return DoWork(project, *args)
+    return DoWork(project, mirror, opt, cmd, shell, cnt, config)
   except KeyboardInterrupt:
-    print('%s: Worker interrupted' % project['name'])
+    print('%s: Worker interrupted' % project.name)
     raise WorkerKeyboardInterrupt()
 
 
@@ -311,94 +279,57 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
       val = ''
     env[name] = val
 
-  setenv('REPO_PROJECT', project['name'])
-  setenv('REPO_PATH', project['relpath'])
-  setenv('REPO_REMOTE', project['remote_name'])
-  setenv('REPO_LREV', project['lrev'])
-  setenv('REPO_RREV', project['rrev'])
-  setenv('REPO_UPSTREAM', project['upstream'])
-  setenv('REPO_DEST_BRANCH', project['dest_branch'])
+  setenv('REPO_PROJECT', project.name)
+  setenv('REPO_PATH', project.relpath)
+  setenv('REPO_REMOTE', project.remote.name)
+  setenv('REPO_LREV', '' if mirror else project.GetRevisionId())
+  setenv('REPO_RREV', project.revisionExpr)
+  setenv('REPO_UPSTREAM', project.upstream)
+  setenv('REPO_DEST_BRANCH', project.dest_branch)
   setenv('REPO_I', str(cnt + 1))
-  for name in project['annotations']:
-    setenv("REPO__%s" % (name), project['annotations'][name])
+  for annotation in project.annotations:
+    setenv("REPO__%s" % (annotation.name), annotation.value)
 
   if mirror:
-    setenv('GIT_DIR', project['gitdir'])
-    cwd = project['gitdir']
+    setenv('GIT_DIR', project.gitdir)
+    cwd = project.gitdir
   else:
-    cwd = project['worktree']
+    cwd = project.worktree
 
   if not os.path.exists(cwd):
     # Allow the user to silently ignore missing checkouts so they can run on
     # partial checkouts (good for infra recovery tools).
     if opt.ignore_missing:
-      return 0
+      return (0, '')
+
+    output = ''
     if ((opt.project_header and opt.verbose)
             or not opt.project_header):
-      print('skipping %s/' % project['relpath'], file=sys.stderr)
-    return 1
+      output = 'skipping %s/' % project.relpath
+    return (1, output)
 
-  if opt.project_header:
-    stdin = subprocess.PIPE
-    stdout = subprocess.PIPE
-    stderr = subprocess.PIPE
+  if opt.verbose:
+    stderr = subprocess.STDOUT
   else:
-    stdin = None
-    stdout = None
-    stderr = None
+    stderr = subprocess.DEVNULL
 
-  p = subprocess.Popen(cmd,
-                       cwd=cwd,
-                       shell=shell,
-                       env=env,
-                       stdin=stdin,
-                       stdout=stdout,
-                       stderr=stderr)
+  result = subprocess.run(
+      cmd, cwd=cwd, shell=shell, env=env, check=False,
+      encoding='utf-8', errors='replace',
+      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
 
+  output = result.stdout
   if opt.project_header:
-    out = ForallColoring(config)
-    out.redirect(sys.stdout)
-    empty = True
-    errbuf = ''
-
-    p.stdin.close()
-    s_in = platform_utils.FileDescriptorStreams.create()
-    s_in.add(p.stdout, sys.stdout, 'stdout')
-    s_in.add(p.stderr, sys.stderr, 'stderr')
-
-    while not s_in.is_done:
-      in_ready = s_in.select()
-      for s in in_ready:
-        buf = s.read().decode()
-        if not buf:
-          s_in.remove(s)
-          s.close()
-          continue
-
-        if not opt.verbose:
-          if s.std_name == 'stderr':
-            errbuf += buf
-            continue
-
-        if empty and out:
-          if not cnt == 0:
-            out.nl()
-
-          if mirror:
-            project_header_path = project['name']
-          else:
-            project_header_path = project['relpath']
-          out.project('project %s/', project_header_path)
-          out.nl()
-          out.flush()
-          if errbuf:
-            sys.stderr.write(errbuf)
-            sys.stderr.flush()
-            errbuf = ''
-          empty = False
-
-        s.dest.write(buf)
-        s.dest.flush()
-
-  r = p.wait()
-  return r
+    if output:
+      buf = io.StringIO()
+      out = ForallColoring(config)
+      out.redirect(buf)
+      if mirror:
+        project_header_path = project.name
+      else:
+        project_header_path = project.relpath
+      out.project('project %s/' % project_header_path)
+      out.nl()
+      buf.write(output)
+      output = buf.getvalue()
+  return (result.returncode, output)

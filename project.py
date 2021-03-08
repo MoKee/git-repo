@@ -232,7 +232,7 @@ class ReviewableBranch(object):
 class StatusColoring(Coloring):
 
   def __init__(self, config):
-    Coloring.__init__(self, config, 'status')
+    super().__init__(config, 'status')
     self.project = self.printer('header', attr='bold')
     self.branch = self.printer('header', attr='bold')
     self.nobranch = self.printer('nobranch', fg='red')
@@ -246,7 +246,7 @@ class StatusColoring(Coloring):
 class DiffColoring(Coloring):
 
   def __init__(self, config):
-    Coloring.__init__(self, config, 'diff')
+    super().__init__(config, 'diff')
     self.project = self.printer('header', attr='bold')
     self.fail = self.printer('fail', fg='red')
 
@@ -832,10 +832,12 @@ class Project(object):
 
     return 'DIRTY'
 
-  def PrintWorkTreeDiff(self, absolute_paths=False):
+  def PrintWorkTreeDiff(self, absolute_paths=False, output_redir=None):
     """Prints the status of the repository to stdout.
     """
     out = DiffColoring(self.config)
+    if output_redir:
+      out.redirect(output_redir)
     cmd = ['diff']
     if out.is_on:
       cmd.append('--color')
@@ -849,6 +851,7 @@ class Project(object):
                      cmd,
                      capture_stdout=True,
                      capture_stderr=True)
+      p.Wait()
     except GitError as e:
       out.nl()
       out.project('project %s/' % self.relpath)
@@ -856,16 +859,11 @@ class Project(object):
       out.fail('%s', str(e))
       out.nl()
       return False
-    has_diff = False
-    for line in p.process.stdout:
-      if not hasattr(line, 'encode'):
-        line = line.decode()
-      if not has_diff:
-        out.nl()
-        out.project('project %s/' % self.relpath)
-        out.nl()
-        has_diff = True
-      print(line[:-1])
+    if p.stdout:
+      out.nl()
+      out.project('project %s/' % self.relpath)
+      out.nl()
+      out.write(p.stdout)
     return p.Wait() == 0
 
 # Publish / Upload ##
@@ -1041,6 +1039,7 @@ class Project(object):
   def Sync_NetworkHalf(self,
                        quiet=False,
                        verbose=False,
+                       output_redir=None,
                        is_new=None,
                        current_branch_only=False,
                        force_sync=False,
@@ -1082,6 +1081,12 @@ class Project(object):
         _warn("Cannot remove archive %s: %s", tarpath, str(e))
       self._CopyAndLinkFiles()
       return True
+
+    # If the shared object dir already exists, don't try to rebootstrap with a
+    # clone bundle download.  We should have the majority of objects already.
+    if clone_bundle and os.path.exists(self.objdir):
+      clone_bundle = False
+
     if is_new is None:
       is_new = not self.Exists
     if is_new:
@@ -1128,8 +1133,9 @@ class Project(object):
             (ID_RE.match(self.revisionExpr) and
              self._CheckForImmutableRevision())):
       if not self._RemoteFetch(
-              initial=is_new, quiet=quiet, verbose=verbose, alt_dir=alt_dir,
-              current_branch_only=current_branch_only,
+              initial=is_new,
+              quiet=quiet, verbose=verbose, output_redir=output_redir,
+              alt_dir=alt_dir, current_branch_only=current_branch_only,
               tags=tags, prune=prune, depth=depth,
               submodules=submodules, force_sync=force_sync,
               clone_filter=clone_filter, retry_fetches=retry_fetches):
@@ -1141,7 +1147,11 @@ class Project(object):
       alternates_file = os.path.join(self.gitdir, 'objects/info/alternates')
       if os.path.exists(alternates_file):
         cmd = ['repack', '-a', '-d']
-        if GitCommand(self, cmd, bare=True).Wait() != 0:
+        p = GitCommand(self, cmd, bare=True, capture_stdout=bool(output_redir),
+                       merge_output=bool(output_redir))
+        if p.stdout and output_redir:
+          output_redir.write(p.stdout)
+        if p.Wait() != 0:
           return False
         platform_utils.remove(alternates_file)
 
@@ -1953,6 +1963,7 @@ class Project(object):
                    initial=False,
                    quiet=False,
                    verbose=False,
+                   output_redir=None,
                    alt_dir=None,
                    tags=True,
                    prune=False,
@@ -2130,15 +2141,18 @@ class Project(object):
     ok = prune_tried = False
     for try_n in range(retry_fetches):
       gitcmd = GitCommand(self, cmd, bare=True, ssh_proxy=ssh_proxy,
-                          merge_output=True, capture_stdout=quiet)
+                          merge_output=True, capture_stdout=quiet or bool(output_redir))
+      if gitcmd.stdout and not quiet and output_redir:
+        output_redir.write(gitcmd.stdout)
       ret = gitcmd.Wait()
       if ret == 0:
         ok = True
         break
 
       # Retry later due to HTTP 429 Too Many Requests.
-      elif ('error:' in gitcmd.stderr and
-            'HTTP 429' in gitcmd.stderr):
+      elif (gitcmd.stdout and
+            'error:' in gitcmd.stdout and
+            'HTTP 429' in gitcmd.stdout):
         if not quiet:
           print('429 received, sleeping: %s sec' % retry_cur_sleep,
                 file=sys.stderr)
@@ -2151,8 +2165,9 @@ class Project(object):
 
       # If this is not last attempt, try 'git remote prune'.
       elif (try_n < retry_fetches - 1 and
-            'error:' in gitcmd.stderr and
-            'git remote prune' in gitcmd.stderr and
+            gitcmd.stdout and
+            'error:' in gitcmd.stdout and
+            'git remote prune' in gitcmd.stdout and
             not prune_tried):
         prune_tried = True
         prunecmd = GitCommand(self, ['remote', 'prune', name], bare=True,
@@ -2170,7 +2185,7 @@ class Project(object):
         # Git died with a signal, exit immediately
         break
       if not verbose:
-        print('%s:\n%s' % (self.name, gitcmd.stdout), file=sys.stderr)
+        print('\n%s:\n%s' % (self.name, gitcmd.stdout), file=sys.stderr)
       time.sleep(random.randint(30, 45))
 
     if initial:
@@ -2189,7 +2204,7 @@ class Project(object):
         # Sync the current branch only with depth set to None.
         # We always pass depth=None down to avoid infinite recursion.
         return self._RemoteFetch(
-            name=name, quiet=quiet, verbose=verbose,
+            name=name, quiet=quiet, verbose=verbose, output_redir=output_redir,
             current_branch_only=current_branch_only and depth,
             initial=False, alt_dir=alt_dir,
             depth=None, clone_filter=clone_filter)
@@ -2883,48 +2898,44 @@ class Project(object):
                      bare=False,
                      capture_stdout=True,
                      capture_stderr=True)
-      try:
-        out = p.process.stdout.read()
-        if not hasattr(out, 'encode'):
-          out = out.decode()
-        r = {}
-        if out:
-          out = iter(out[:-1].split('\0'))
-          while out:
-            try:
-              info = next(out)
-              path = next(out)
-            except StopIteration:
-              break
+      p.Wait()
+      r = {}
+      out = p.stdout
+      if out:
+        out = iter(out[:-1].split('\0'))
+        while out:
+          try:
+            info = next(out)
+            path = next(out)
+          except StopIteration:
+            break
 
-            class _Info(object):
+          class _Info(object):
 
-              def __init__(self, path, omode, nmode, oid, nid, state):
-                self.path = path
-                self.src_path = None
-                self.old_mode = omode
-                self.new_mode = nmode
-                self.old_id = oid
-                self.new_id = nid
+            def __init__(self, path, omode, nmode, oid, nid, state):
+              self.path = path
+              self.src_path = None
+              self.old_mode = omode
+              self.new_mode = nmode
+              self.old_id = oid
+              self.new_id = nid
 
-                if len(state) == 1:
-                  self.status = state
-                  self.level = None
-                else:
-                  self.status = state[:1]
-                  self.level = state[1:]
-                  while self.level.startswith('0'):
-                    self.level = self.level[1:]
+              if len(state) == 1:
+                self.status = state
+                self.level = None
+              else:
+                self.status = state[:1]
+                self.level = state[1:]
+                while self.level.startswith('0'):
+                  self.level = self.level[1:]
 
-            info = info[1:].split(' ')
-            info = _Info(path, *info)
-            if info.status in ('R', 'C'):
-              info.src_path = info.path
-              info.path = next(out)
-            r[info.path] = info
-        return r
-      finally:
-        p.Wait()
+          info = info[1:].split(' ')
+          info = _Info(path, *info)
+          if info.status in ('R', 'C'):
+            info.src_path = info.path
+            info.path = next(out)
+          r[info.path] = info
+      return r
 
     def GetDotgitPath(self, subpath=None):
       """Return the full path to the .git dir.
@@ -3121,7 +3132,7 @@ class _Later(object):
 class _SyncColoring(Coloring):
 
   def __init__(self, config):
-    Coloring.__init__(self, config, 'reposync')
+    super().__init__(config, 'reposync')
     self.project = self.printer('header', attr='bold')
     self.info = self.printer('info')
     self.fail = self.printer('fail', fg='red')

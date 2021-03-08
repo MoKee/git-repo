@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import http.cookiejar as cookielib
+import io
 import json
+import multiprocessing
 import netrc
 from optparse import SUPPRESS_HELP
 import os
@@ -55,7 +58,7 @@ import git_superproject
 import gitc_utils
 from project import Project
 from project import RemoteSpec
-from command import Command, MirrorSafeCommand
+from command import Command, MirrorSafeCommand, WORKER_BATCH_SIZE
 from error import RepoChangedException, GitError, ManifestParseError
 import platform_utils
 from project import SyncBuffer
@@ -68,11 +71,6 @@ _ONE_DAY_S = 24 * 60 * 60
 
 class _FetchError(Exception):
   """Internal error thrown in _FetchHelper() when we don't want stack trace."""
-  pass
-
-
-class _CheckoutError(Exception):
-  """Internal error thrown in _CheckoutOne() when we don't want stack trace."""
 
 
 class Sync(Command, MirrorSafeCommand):
@@ -178,12 +176,14 @@ If the remote SSH daemon is Gerrit Code Review, version 2.0.10 or
 later is required to fix a server side protocol bug.
 
 """
+  PARALLEL_JOBS = 1
 
   def _Options(self, p, show_smart=True):
     try:
-      self.jobs = self.manifest.default.sync_j
+      self.PARALLEL_JOBS = self.manifest.default.sync_j
     except ManifestParseError:
-      self.jobs = 1
+      pass
+    super()._Options(p)
 
     p.add_option('-f', '--force-broken',
                  dest='force_broken', action='store_true',
@@ -223,9 +223,6 @@ later is required to fix a server side protocol bug.
     p.add_option('-q', '--quiet',
                  dest='output_mode', action='store_false',
                  help='only show errors')
-    p.add_option('-j', '--jobs',
-                 dest='jobs', action='store', type='int',
-                 help="projects to fetch simultaneously (default %d)" % self.jobs)
     p.add_option('-m', '--manifest-name',
                  dest='manifest_name',
                  help='temporary manifest to use for this sync', metavar='NAME.xml')
@@ -356,11 +353,15 @@ later is required to fix a server side protocol bug.
     # - We always make sure we unlock the lock if we locked it.
     start = time.time()
     success = False
+    buf = io.StringIO()
+    with lock:
+      pm.start(project.name)
     try:
       try:
         success = project.Sync_NetworkHalf(
             quiet=opt.quiet,
             verbose=opt.verbose,
+            output_redir=buf,
             current_branch_only=opt.current_branch_only,
             force_sync=opt.force_sync,
             clone_bundle=opt.clone_bundle,
@@ -376,6 +377,10 @@ later is required to fix a server side protocol bug.
         lock.acquire()
         did_lock = True
 
+        output = buf.getvalue()
+        if opt.verbose and output:
+          pm.update(inc=0, msg=output.rstrip())
+
         if not success:
           err_event.set()
           print('error: Cannot fetch %s from %s'
@@ -385,7 +390,6 @@ later is required to fix a server side protocol bug.
             raise _FetchError()
 
         fetched.add(project.gitdir)
-        pm.update(msg=project.name)
       except _FetchError:
         pass
       except Exception as e:
@@ -394,8 +398,10 @@ later is required to fix a server side protocol bug.
         err_event.set()
         raise
     finally:
-      if did_lock:
-        lock.release()
+      if not did_lock:
+        lock.acquire()
+      pm.finish(project.name)
+      lock.release()
       finish = time.time()
       self.event_log.AddSync(project, event_log.TASK_SYNC_NETWORK,
                              start, finish, success)
@@ -405,8 +411,8 @@ later is required to fix a server side protocol bug.
   def _Fetch(self, projects, opt, err_event):
     fetched = set()
     lock = _threading.Lock()
-    pm = Progress('Fetching projects', len(projects),
-                  always_print_percentage=opt.quiet)
+    pm = Progress('Fetching', len(projects),
+                  print_newline=not(opt.quiet))
 
     objdir_project_map = dict()
     for project in projects:
@@ -417,7 +423,7 @@ later is required to fix a server side protocol bug.
     for project_list in objdir_project_map.values():
       # Check for any errors before running any more tasks.
       # ...we'll let existing threads finish, though.
-      if err_event.isSet() and opt.fail_fast:
+      if err_event.is_set() and opt.fail_fast:
         break
 
       sem.acquire()
@@ -450,148 +456,79 @@ later is required to fix a server side protocol bug.
 
     return fetched
 
-  def _CheckoutWorker(self, opt, sem, project, *args, **kwargs):
-    """Main function of the fetch threads.
-
-    Delegates most of the work to _CheckoutOne.
-
-    Args:
-      opt: Program options returned from optparse.  See _Options().
-      projects: Projects to fetch.
-      sem: We'll release() this semaphore when we exit so that another thread
-          can be started up.
-      *args, **kwargs: Remaining arguments to pass to _CheckoutOne. See the
-          _CheckoutOne docstring for details.
-    """
-    try:
-      return self._CheckoutOne(opt, project, *args, **kwargs)
-    finally:
-      sem.release()
-
-  def _CheckoutOne(self, opt, project, lock, pm, err_event, err_results):
+  def _CheckoutOne(self, opt, project):
     """Checkout work tree for one project
 
     Args:
       opt: Program options returned from optparse.  See _Options().
       project: Project object for the project to checkout.
-      lock: Lock for accessing objects that are shared amongst multiple
-          _CheckoutWorker() threads.
-      pm: Instance of a Project object.  We will call pm.update() (with our
-          lock held).
-      err_event: We'll set this event in the case of an error (after printing
-          out info about the error).
-      err_results: A list of strings, paths to git repos where checkout
-          failed.
 
     Returns:
       Whether the fetch was successful.
     """
-    # We'll set to true once we've locked the lock.
-    did_lock = False
-
-    # Encapsulate everything in a try/except/finally so that:
-    # - We always set err_event in the case of an exception.
-    # - We always make sure we unlock the lock if we locked it.
     start = time.time()
     syncbuf = SyncBuffer(self.manifest.manifestProject.config,
                          detach_head=opt.detach_head)
     success = False
     try:
-      try:
-        project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
+      project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
+      success = syncbuf.Finish()
+    except Exception as e:
+      print('error: Cannot checkout %s: %s: %s' %
+            (project.name, type(e).__name__, str(e)),
+            file=sys.stderr)
+      raise
 
-        # Lock around all the rest of the code, since printing, updating a set
-        # and Progress.update() are not thread safe.
-        lock.acquire()
-        success = syncbuf.Finish()
-        did_lock = True
+    if not success:
+      print('error: Cannot checkout %s' % (project.name), file=sys.stderr)
+    finish = time.time()
+    return (success, project, start, finish)
 
-        if not success:
-          err_event.set()
-          print('error: Cannot checkout %s' % (project.name),
-                file=sys.stderr)
-          raise _CheckoutError()
-
-        pm.update(msg=project.name)
-      except _CheckoutError:
-        pass
-      except Exception as e:
-        print('error: Cannot checkout %s: %s: %s' %
-              (project.name, type(e).__name__, str(e)),
-              file=sys.stderr)
-        err_event.set()
-        raise
-    finally:
-      if did_lock:
-        if not success:
-          err_results.append(project.relpath)
-        lock.release()
-      finish = time.time()
-      self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
-                             start, finish, success)
-
-    return success
-
-  def _Checkout(self, all_projects, opt, err_event, err_results):
+  def _Checkout(self, all_projects, opt, err_results):
     """Checkout projects listed in all_projects
 
     Args:
       all_projects: List of all projects that should be checked out.
       opt: Program options returned from optparse.  See _Options().
-      err_event: We'll set this event in the case of an error (after printing
-          out info about the error).
-      err_results: A list of strings, paths to git repos where checkout
-          failed.
+      err_results: A list of strings, paths to git repos where checkout failed.
     """
+    ret = True
 
-    # Perform checkouts in multiple threads when we are using partial clone.
-    # Without partial clone, all needed git objects are already downloaded,
-    # in this situation it's better to use only one process because the checkout
-    # would be mostly disk I/O; with partial clone, the objects are only
-    # downloaded when demanded (at checkout time), which is similar to the
-    # Sync_NetworkHalf case and parallelism would be helpful.
-    if self.manifest.CloneFilter:
-      syncjobs = self.jobs
+    # Only checkout projects with worktrees.
+    all_projects = [x for x in all_projects if x.worktree]
+
+    pm = Progress('Checking out', len(all_projects))
+
+    def _ProcessResults(results):
+      for (success, project, start, finish) in results:
+        self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
+                               start, finish, success)
+        # Check for any errors before running any more tasks.
+        # ...we'll let existing threads finish, though.
+        if not success:
+          err_results.append(project.relpath)
+          if opt.fail_fast:
+            return False
+        pm.update(msg=project.name)
+      return True
+
+    # NB: Multiprocessing is heavy, so don't spin it up for one job.
+    if len(all_projects) == 1 or opt.jobs == 1:
+      if not _ProcessResults(self._CheckoutOne(opt, x) for x in all_projects):
+        ret = False
     else:
-      syncjobs = 1
-
-    lock = _threading.Lock()
-    pm = Progress('Checking out projects', len(all_projects),
-                  print_newline=not(opt.quiet),
-                  always_print_percentage=opt.quiet)
-
-    threads = set()
-    sem = _threading.Semaphore(syncjobs)
-
-    for project in all_projects:
-      # Check for any errors before running any more tasks.
-      # ...we'll let existing threads finish, though.
-      if err_event.isSet() and opt.fail_fast:
-        break
-
-      sem.acquire()
-      if project.worktree:
-        kwargs = dict(opt=opt,
-                      sem=sem,
-                      project=project,
-                      lock=lock,
-                      pm=pm,
-                      err_event=err_event,
-                      err_results=err_results)
-        if syncjobs > 1:
-          t = _threading.Thread(target=self._CheckoutWorker,
-                                kwargs=kwargs)
-          # Ensure that Ctrl-C will not freeze the repo process.
-          t.daemon = True
-          threads.add(t)
-          t.start()
-        else:
-          self._CheckoutWorker(**kwargs)
-
-    for t in threads:
-      t.join()
+      with multiprocessing.Pool(opt.jobs) as pool:
+        results = pool.imap_unordered(
+            functools.partial(self._CheckoutOne, opt),
+            all_projects,
+            chunksize=WORKER_BATCH_SIZE)
+        if not _ProcessResults(results):
+          ret = False
+          pool.close()
 
     pm.end()
+
+    return ret
 
   def _GCProjects(self, projects, opt, err_event):
     gc_gitdirs = {}
@@ -642,7 +579,7 @@ later is required to fix a server side protocol bug.
         sem.release()
 
     for bare_git in gc_gitdirs.values():
-      if err_event.isSet() and opt.fail_fast:
+      if err_event.is_set() and opt.fail_fast:
         break
       sem.acquire()
       t = _threading.Thread(target=GC, args=(bare_git,))
@@ -893,7 +830,9 @@ later is required to fix a server side protocol bug.
     else:
       self._UpdateManifestProject(opt, mp, manifest_name)
 
-    if opt.use_superproject:
+    if (opt.use_superproject or
+        self.manifest.manifestProject.config.GetBoolean(
+            'repo.superproject')):
       manifest_name = self._UpdateProjectsRevisionId(opt, args)
 
     if self.gitc_manifest:
@@ -937,7 +876,6 @@ later is required to fix a server side protocol bug.
 
     err_network_sync = False
     err_update_projects = False
-    err_checkout = False
 
     self._fetch_times = _FetchTimes(self.manifest)
     if not opt.local_only:
@@ -953,7 +891,7 @@ later is required to fix a server side protocol bug.
       _PostRepoFetch(rp, opt.repo_verify)
       if opt.network_only:
         # bail out now; the rest touches the working tree
-        if err_event.isSet():
+        if err_event.is_set():
           print('\nerror: Exited sync due to fetch errors.\n', file=sys.stderr)
           sys.exit(1)
         return
@@ -980,7 +918,7 @@ later is required to fix a server side protocol bug.
         fetched.update(self._Fetch(missing, opt, err_event))
 
       # If we saw an error, exit with code 1 so that other scripts can check.
-      if err_event.isSet():
+      if err_event.is_set():
         err_network_sync = True
         if opt.fail_fast:
           print('\nerror: Exited sync due to fetch errors.\n'
@@ -1002,10 +940,10 @@ later is required to fix a server side protocol bug.
         sys.exit(1)
 
     err_results = []
-    self._Checkout(all_projects, opt, err_event, err_results)
-    if err_event.isSet():
-      err_checkout = True
-      # NB: We don't exit here because this is the last step.
+    # NB: We don't exit here because this is the last step.
+    err_checkout = not self._Checkout(all_projects, opt, err_results)
+    if err_checkout:
+      err_event.set()
 
     # If there's a notice that's supposed to print at the end of the sync, print
     # it now...
@@ -1013,7 +951,7 @@ later is required to fix a server side protocol bug.
       print(self.manifest.notice)
 
     # If we saw an error, exit with code 1 so that other scripts can check.
-    if err_event.isSet():
+    if err_event.is_set():
       print('\nerror: Unable to fully sync the tree.', file=sys.stderr)
       if err_network_sync:
         print('error: Downloading network changes failed.', file=sys.stderr)
@@ -1088,20 +1026,11 @@ def _VerifyTag(project):
   env['GNUPGHOME'] = gpg_dir
 
   cmd = [GIT, 'tag', '-v', cur]
-  proc = subprocess.Popen(cmd,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE,
-                          env=env)
-  out = proc.stdout.read()
-  proc.stdout.close()
-
-  err = proc.stderr.read()
-  proc.stderr.close()
-
-  if proc.wait() != 0:
+  result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          env=env, check=False)
+  if result.returncode:
     print(file=sys.stderr)
-    print(out, file=sys.stderr)
-    print(err, file=sys.stderr)
+    print(result.stdout, file=sys.stderr)
     print(file=sys.stderr)
     return False
   return True

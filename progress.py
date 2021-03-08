@@ -25,18 +25,44 @@ _NOT_TTY = not os.isatty(2)
 CSI_ERASE_LINE = '\x1b[2K'
 
 
+def duration_str(total):
+  """A less noisy timedelta.__str__.
+
+  The default timedelta stringification contains a lot of leading zeros and
+  uses microsecond resolution.  This makes for noisy output.
+  """
+  hours, rem = divmod(total, 3600)
+  mins, secs = divmod(rem, 60)
+  ret = '%.3fs' % (secs,)
+  if mins:
+    ret = '%im%s' % (mins, ret)
+  if hours:
+    ret = '%ih%s' % (hours, ret)
+  return ret
+
+
 class Progress(object):
-  def __init__(self, title, total=0, units='', print_newline=False,
-               always_print_percentage=False):
+  def __init__(self, title, total=0, units='', print_newline=False):
     self._title = title
     self._total = total
     self._done = 0
-    self._lastp = -1
     self._start = time()
     self._show = False
     self._units = units
     self._print_newline = print_newline
-    self._always_print_percentage = always_print_percentage
+    # Only show the active jobs section if we run more than one in parallel.
+    self._show_jobs = False
+    self._active = 0
+
+  def start(self, name):
+    self._active += 1
+    if not self._show_jobs:
+      self._show_jobs = self._active > 1
+    self.update(inc=0, msg='started ' + name)
+
+  def finish(self, name):
+    self.update(msg='finished ' + name)
+    self._active -= 1
 
   def update(self, inc=1, msg=''):
     self._done += inc
@@ -58,35 +84,40 @@ class Progress(object):
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
-
-      if self._lastp != p or self._always_print_percentage:
-        self._lastp = p
-        sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s)\033[0;0m %s%s%s' % (
-            CSI_ERASE_LINE,
-            self._title,
-            p,
-            self._done, self._units,
-            self._total, self._units,
-            ' ' if msg else '', msg,
-            "\n" if self._print_newline else ""))
-        sys.stderr.flush()
+      if self._show_jobs:
+        jobs = '[%d job%s] ' % (self._active, 's' if self._active > 1 else '')
+      else:
+        jobs = ''
+      sys.stderr.write('%s\r\033[1;33m%s: %2d%% %s(%d%s/%d%s)\033[0;0m %s%s%s' % (
+          CSI_ERASE_LINE,
+          self._title,
+          p,
+          jobs,
+          self._done, self._units,
+          self._total, self._units,
+          ' ' if msg else '', msg,
+          '\n' if self._print_newline else ''))
+      sys.stderr.flush()
 
   def end(self):
     if _NOT_TTY or IsTrace() or not self._show:
       return
 
+    duration = duration_str(time() - self._start)
     if self._total <= 0:
-      sys.stderr.write('%s\r\033[1;33m%s: %d, done.\033[0;0m\n' % (
+      sys.stderr.write('%s\r\033[1;33m%s: %d, done in %s\033[0;0m\n' % (
           CSI_ERASE_LINE,
           self._title,
-          self._done))
+          self._done,
+          duration))
       sys.stderr.flush()
     else:
       p = (100 * self._done) / self._total
-      sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s), done.\033[0;0m\n' % (
+      sys.stderr.write('%s\r\033[1;33m%s: %3d%% (%d%s/%d%s), done in %s\033[0;0m\n' % (
           CSI_ERASE_LINE,
           self._title,
           p,
           self._done, self._units,
-          self._total, self._units))
+          self._total, self._units,
+          duration))
       sys.stderr.flush()

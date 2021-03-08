@@ -533,7 +533,6 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
   def _output_manifest_project_extras(self, p, e):
     """Manifests can modify e if they support extra project attributes."""
-    pass
 
   @property
   def paths(self):
@@ -625,16 +624,22 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         b = b[len(R_HEADS):]
       self.branch = b
 
+      # The manifestFile was specified by the user which is why we allow include
+      # paths to point anywhere.
       nodes = []
-      nodes.append(self._ParseManifestXml(self.manifestFile,
-                                          self.manifestProject.worktree))
+      nodes.append(self._ParseManifestXml(
+          self.manifestFile, self.manifestProject.worktree,
+          restrict_includes=False))
 
       if self._load_local_manifests and self.local_manifests:
         try:
           for local_file in sorted(platform_utils.listdir(self.local_manifests)):
             if local_file.endswith('.xml'):
               local = os.path.join(self.local_manifests, local_file)
-              nodes.append(self._ParseManifestXml(local, self.repodir))
+              # Since local manifests are entirely managed by the user, allow
+              # them to point anywhere the user wants.
+              nodes.append(self._ParseManifestXml(
+                  local, self.repodir, restrict_includes=False))
         except OSError:
           pass
 
@@ -652,7 +657,19 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
       self._loaded = True
 
-  def _ParseManifestXml(self, path, include_root, parent_groups=''):
+  def _ParseManifestXml(self, path, include_root, parent_groups='',
+                        restrict_includes=True):
+    """Parse a manifest XML and return the computed nodes.
+
+    Args:
+      path: The XML file to read & parse.
+      include_root: The path to interpret include "name"s relative to.
+      parent_groups: The groups to apply to this projects.
+      restrict_includes: Whether to constrain the "name" attribute of includes.
+
+    Returns:
+      List of XML nodes.
+    """
     try:
       root = xml.dom.minidom.parse(path)
     except (OSError, xml.parsers.expat.ExpatError) as e:
@@ -671,6 +688,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     for node in manifest.childNodes:
       if node.nodeName == 'include':
         name = self._reqatt(node, 'name')
+        if restrict_includes:
+          msg = self._CheckLocalPath(name)
+          if msg:
+            raise ManifestInvalidPathError(
+                '<include> invalid "name": %s: %s' % (name, msg))
         include_groups = ''
         if parent_groups:
           include_groups = parent_groups
@@ -678,13 +700,13 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
           include_groups = node.getAttribute('groups') + ',' + include_groups
         fp = os.path.join(include_root, name)
         if not os.path.isfile(fp):
-          raise ManifestParseError("include %s doesn't exist or isn't a file"
-                                   % (name,))
+          raise ManifestParseError("include [%s/]%s doesn't exist or isn't a file"
+                                   % (include_root, name))
         try:
           nodes.extend(self._ParseManifestXml(fp, include_root, include_groups))
         # should isolate this to the exact exception, but that's
         # tricky.  actual parsing implementation may vary.
-        except (KeyboardInterrupt, RuntimeError, SystemExit):
+        except (KeyboardInterrupt, RuntimeError, SystemExit, ManifestParseError):
           raise
         except Exception as e:
           raise ManifestParseError(
@@ -980,6 +1002,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     reads a <project> element from the manifest file
     """
     name = self._reqatt(node, 'name')
+    msg = self._CheckLocalPath(name, dir_ok=True)
+    if msg:
+      raise ManifestInvalidPathError(
+          '<project> invalid "name": %s: %s' % (name, msg))
     if parent:
       name = self._JoinName(parent.name, name)
 
@@ -1000,9 +1026,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     path = node.getAttribute('path')
     if not path:
       path = name
-    if path.startswith('/'):
-      raise ManifestParseError("project %s path cannot be absolute in %s" %
-                               (name, self.manifestFile))
+    else:
+      msg = self._CheckLocalPath(path, dir_ok=True)
+      if msg:
+        raise ManifestInvalidPathError(
+            '<project> invalid "path": %s: %s' % (path, msg))
 
     rebase = XmlBool(node, 'rebase', True)
     sync_c = XmlBool(node, 'sync-c', False)
@@ -1122,8 +1150,33 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     return relpath, worktree, gitdir, objdir
 
   @staticmethod
-  def _CheckLocalPath(path, symlink=False):
-    """Verify |path| is reasonable for use in <copyfile> & <linkfile>."""
+  def _CheckLocalPath(path, dir_ok=False, cwd_dot_ok=False):
+    """Verify |path| is reasonable for use in filesystem paths.
+
+    Used with <copyfile> & <linkfile> & <project> elements.
+
+    This only validates the |path| in isolation: it does not check against the
+    current filesystem state.  Thus it is suitable as a first-past in a parser.
+
+    It enforces a number of constraints:
+    * No empty paths.
+    * No "~" in paths.
+    * No Unicode codepoints that filesystems might elide when normalizing.
+    * No relative path components like "." or "..".
+    * No absolute paths.
+    * No ".git" or ".repo*" path components.
+
+    Args:
+      path: The path name to validate.
+      dir_ok: Whether |path| may force a directory (e.g. end in a /).
+      cwd_dot_ok: Whether |path| may be just ".".
+
+    Returns:
+      None if |path| is OK, a failure message otherwise.
+    """
+    if not path:
+      return 'empty paths not allowed'
+
     if '~' in path:
       return '~ not allowed (due to 8.3 filenames on Windows filesystems)'
 
@@ -1166,12 +1219,12 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
     # Some people use src="." to create stable links to projects.  Lets allow
     # that but reject all other uses of "." to keep things simple.
-    if parts != ['.']:
+    if not cwd_dot_ok or parts != ['.']:
       for part in set(parts):
         if part in {'.', '..', '.git'} or part.startswith('.repo'):
           return 'bad component: %s' % (part,)
 
-    if not symlink and resep.match(path[-1]):
+    if not dir_ok and resep.match(path[-1]):
       return 'dirs not allowed'
 
     # NB: The two abspath checks here are to handle platforms with multiple
@@ -1203,7 +1256,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
     # |src| is the file we read from or path we point to for symlinks.
     # It is relative to the top of the git project checkout.
-    msg = cls._CheckLocalPath(src, symlink=element == 'linkfile')
+    is_linkfile = element == 'linkfile'
+    msg = cls._CheckLocalPath(src, dir_ok=is_linkfile, cwd_dot_ok=is_linkfile)
     if msg:
       raise ManifestInvalidPathError(
           '<%s> invalid "src": %s: %s' % (element, src, msg))
@@ -1302,7 +1356,7 @@ class GitcManifest(XmlManifest):
 
   def _ParseProject(self, node, parent=None):
     """Override _ParseProject and add support for GITC specific attributes."""
-    return super(GitcManifest, self)._ParseProject(
+    return super()._ParseProject(
         node, parent=parent, old_revision=node.getAttribute('old-revision'))
 
   def _output_manifest_project_extras(self, p, e):
@@ -1326,7 +1380,7 @@ class RepoClient(XmlManifest):
     if manifest_file is None:
       manifest_file = os.path.join(repodir, MANIFEST_FILE_NAME)
     local_manifests = os.path.abspath(os.path.join(repodir, LOCAL_MANIFESTS_DIR_NAME))
-    super(RepoClient, self).__init__(repodir, manifest_file, local_manifests)
+    super().__init__(repodir, manifest_file, local_manifests)
 
     # TODO: Completely separate manifest logic out of the client.
     self.manifest = self
@@ -1341,6 +1395,5 @@ class GitcClient(RepoClient, GitcManifest):
     self.gitc_client_dir = os.path.join(gitc_utils.get_gitc_manifest_dir(),
                                         gitc_client_name)
 
-    super(GitcManifest, self).__init__(
-        repodir, os.path.join(self.gitc_client_dir, '.manifest'))
+    super().__init__(repodir, os.path.join(self.gitc_client_dir, '.manifest'))
     self.isGitcClient = True

@@ -16,15 +16,7 @@ import itertools
 import multiprocessing
 import sys
 from color import Coloring
-from command import Command
-
-# Number of projects to submit to a single worker process at a time.
-# This number represents a tradeoff between the overhead of IPC and finer
-# grained opportunity for parallelism. This particular value was chosen by
-# iterating through powers of two until the overall performance no longer
-# improved. The performance of this batch size is not a function of the
-# number of cores on the system.
-WORKER_BATCH_SIZE = 32
+from command import Command, DEFAULT_LOCAL_JOBS, WORKER_BATCH_SIZE
 
 
 class BranchColoring(Coloring):
@@ -103,17 +95,7 @@ the branch appears in, or does not appear in.  If no project list
 is shown, then the branch appears in all projects.
 
 """
-
-  def _Options(self, p):
-    """Add flags to CLI parser for this subcommand."""
-    default_jobs = min(multiprocessing.cpu_count(), 8)
-    p.add_option(
-        '-j',
-        '--jobs',
-        type=int,
-        default=default_jobs,
-        help='Number of worker processes to spawn '
-        '(default: %s)' % default_jobs)
+  PARALLEL_JOBS = DEFAULT_LOCAL_JOBS
 
   def Execute(self, opt, args):
     projects = self.GetProjects(args)

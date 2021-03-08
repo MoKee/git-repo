@@ -162,11 +162,10 @@ def RepoSourceVersion():
 
     proj = os.path.dirname(os.path.abspath(__file__))
     env[GIT_DIR] = os.path.join(proj, '.git')
-
-    p = subprocess.Popen([GIT, 'describe', HEAD], stdout=subprocess.PIPE,
-                         env=env)
-    if p.wait() == 0:
-      ver = p.stdout.read().strip().decode('utf-8')
+    result = subprocess.run([GIT, 'describe', HEAD], stdout=subprocess.PIPE,
+                            encoding='utf-8', env=env, check=False)
+    if result.returncode == 0:
+      ver = result.stdout.strip()
       if ver.startswith('v'):
         ver = ver[1:]
     else:
@@ -250,7 +249,7 @@ class GitCommand(object):
                project,
                cmdv,
                bare=False,
-               provide_stdin=False,
+               input=None,
                capture_stdout=False,
                capture_stderr=False,
                merge_output=False,
@@ -259,9 +258,6 @@ class GitCommand(object):
                cwd=None,
                gitdir=None):
     env = self._GetBasicEnv()
-
-    # If we are not capturing std* then need to print it.
-    self.tee = {'stdout': not capture_stdout, 'stderr': not capture_stderr}
 
     if disable_editor:
       env['GIT_EDITOR'] = ':'
@@ -289,6 +285,9 @@ class GitCommand(object):
     command = [GIT]
     if bare:
       if gitdir:
+        # Git on Windows wants its paths only using / for reliability.
+        if platform_utils.isWindows():
+          gitdir = gitdir.replace('\\', '/')
         env[GIT_DIR] = gitdir
       cwd = None
     command.append(cmdv[0])
@@ -299,13 +298,10 @@ class GitCommand(object):
         command.append('--progress')
     command.extend(cmdv[1:])
 
-    if provide_stdin:
-      stdin = subprocess.PIPE
-    else:
-      stdin = None
-
-    stdout = subprocess.PIPE
-    stderr = subprocess.STDOUT if merge_output else subprocess.PIPE
+    stdin = subprocess.PIPE if input else None
+    stdout = subprocess.PIPE if capture_stdout else None
+    stderr = (subprocess.STDOUT if merge_output else
+              (subprocess.PIPE if capture_stderr else None))
 
     if IsTrace():
       global LAST_CWD
@@ -341,6 +337,8 @@ class GitCommand(object):
       p = subprocess.Popen(command,
                            cwd=cwd,
                            env=env,
+                           encoding='utf-8',
+                           errors='backslashreplace',
                            stdin=stdin,
                            stdout=stdout,
                            stderr=stderr)
@@ -351,7 +349,17 @@ class GitCommand(object):
       _add_ssh_client(p)
 
     self.process = p
-    self.stdin = p.stdin
+    if input:
+      if isinstance(input, str):
+        input = input.encode('utf-8')
+      p.stdin.write(input)
+      p.stdin.close()
+
+    try:
+      self.stdout, self.stderr = p.communicate()
+    finally:
+      _remove_ssh_client(p)
+    self.rc = p.wait()
 
   @staticmethod
   def _GetBasicEnv():
@@ -371,36 +379,4 @@ class GitCommand(object):
     return env
 
   def Wait(self):
-    try:
-      p = self.process
-      rc = self._CaptureOutput()
-    finally:
-      _remove_ssh_client(p)
-    return rc
-
-  def _CaptureOutput(self):
-    p = self.process
-    s_in = platform_utils.FileDescriptorStreams.create()
-    s_in.add(p.stdout, sys.stdout, 'stdout')
-    if p.stderr is not None:
-      s_in.add(p.stderr, sys.stderr, 'stderr')
-    self.stdout = ''
-    self.stderr = ''
-
-    while not s_in.is_done:
-      in_ready = s_in.select()
-      for s in in_ready:
-        buf = s.read()
-        if not buf:
-          s_in.remove(s)
-          continue
-        if not hasattr(buf, 'encode'):
-          buf = buf.decode('utf-8', 'backslashreplace')
-        if s.std_name == 'stdout':
-          self.stdout += buf
-        else:
-          self.stderr += buf
-        if self.tee[s.std_name]:
-          s.dest.write(buf)
-          s.dest.flush()
-    return p.wait()
+    return self.rc
