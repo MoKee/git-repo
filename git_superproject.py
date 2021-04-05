@@ -41,7 +41,8 @@ class Superproject(object):
   lookup of commit ids for all projects. It contains _project_commit_ids which
   is a dictionary with project/commit id entries.
   """
-  def __init__(self, manifest, repodir, superproject_dir='exp-superproject'):
+  def __init__(self, manifest, repodir, superproject_dir='exp-superproject',
+               quiet=False):
     """Initializes superproject.
 
     Args:
@@ -49,9 +50,11 @@ class Superproject(object):
       repodir: Path to the .repo/ dir for holding all internal checkout state.
           It must be in the top directory of the repo client checkout.
       superproject_dir: Relative path under |repodir| to checkout superproject.
+      quiet:  If True then only print the progress messages.
     """
     self._project_commit_ids = None
     self._manifest = manifest
+    self._quiet = quiet
     self._branch = self._GetBranch()
     self._repodir = os.path.abspath(repodir)
     self._superproject_dir = superproject_dir
@@ -89,6 +92,9 @@ class Superproject(object):
     """
     if not os.path.exists(self._superproject_path):
       os.mkdir(self._superproject_path)
+    if not self._quiet and not os.path.exists(self._work_git):
+      print('%s: Performing initial setup for superproject; this might take '
+            'several minutes.' % self._work_git)
     cmd = ['init', '--bare', self._work_git_name]
     p = GitCommand(None,
                    cmd,
@@ -115,7 +121,7 @@ class Superproject(object):
       print('git fetch missing drectory: %s' % self._work_git,
             file=sys.stderr)
       return False
-    cmd = ['fetch', url, '--force', '--no-tags', '--filter', 'blob:none']
+    cmd = ['fetch', url, '--depth', '1', '--force', '--no-tags', '--filter', 'blob:none']
     if self._branch:
       cmd += [self._branch + ':' + self._branch]
     p = GitCommand(None,
@@ -183,6 +189,8 @@ class Superproject(object):
       return False
     if not self._Fetch(url):
       return False
+    if not self._quiet:
+      print('%s: Initial setup for superproject completed.' % self._work_git)
     return True
 
   def _GetAllProjectsCommitIds(self):
@@ -227,7 +235,7 @@ class Superproject(object):
             self._superproject_path,
             file=sys.stderr)
       return None
-    manifest_str = self._manifest.ToXml().toxml()
+    manifest_str = self._manifest.ToXml(groups=self._manifest.GetGroupsStr()).toxml()
     manifest_path = self._manifest_path
     try:
       with open(manifest_path, 'w', encoding='utf-8') as fp:

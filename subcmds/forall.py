@@ -24,6 +24,7 @@ import subprocess
 
 from color import Coloring
 from command import DEFAULT_LOCAL_JOBS, Command, MirrorSafeCommand, WORKER_BATCH_SIZE
+from error import ManifestInvalidRevisionError
 
 _CAN_COLOR = [
     'branch',
@@ -44,13 +45,18 @@ class Forall(Command, MirrorSafeCommand):
   helpSummary = "Run a shell command in each project"
   helpUsage = """
 %prog [<project>...] -c <command> [<arg>...]
-%prog -r str1 [str2] ... -c <command> [<arg>...]"
+%prog -r str1 [str2] ... -c <command> [<arg>...]
 """
   helpDescription = """
 Executes the same shell command in each project.
 
 The -r option allows running the command only on projects matching
 regex or wildcard expression.
+
+By default, projects are processed non-interactively in parallel.  If you want
+to run interactive commands, make sure to pass --interactive to force --jobs 1.
+While the processing order of projects is not guaranteed, the order of project
+output is stable.
 
 # Output Formatting
 
@@ -154,6 +160,9 @@ without iterating through the remaining projects.
     g.add_option('-v', '--verbose',
                  dest='verbose', action='store_true',
                  help='Show command error messages')
+    p.add_option('--interactive',
+                 action='store_true',
+                 help='force interactive usage')
 
   def WantPager(self, opt):
     return opt.project_header and opt.jobs == 1
@@ -172,6 +181,11 @@ without iterating through the remaining projects.
     if shell:
       cmd.append(cmd[0])
     cmd.extend(opt.command[1:])
+
+    # Historically, forall operated interactively, and in serial.  If the user
+    # has selected 1 job, then default to interacive mode.
+    if opt.jobs == 1:
+      opt.interactive = True
 
     if opt.project_header \
             and not shell \
@@ -239,7 +253,7 @@ without iterating through the remaining projects.
       rc = rc or errno.EINTR
     except Exception as e:
       # Catch any other exceptions raised
-      print('Got an error, terminating the pool: %s: %s' %
+      print('forall: unhandled error, terminating the pool: %s: %s' %
             (type(e).__name__, e),
             file=sys.stderr)
       rc = rc or getattr(e, 'errno', 1)
@@ -282,7 +296,13 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
   setenv('REPO_PROJECT', project.name)
   setenv('REPO_PATH', project.relpath)
   setenv('REPO_REMOTE', project.remote.name)
-  setenv('REPO_LREV', '' if mirror else project.GetRevisionId())
+  try:
+    # If we aren't in a fully synced state and we don't have the ref the manifest
+    # wants, then this will fail.  Ignore it for the purposes of this code.
+    lrev = '' if mirror else project.GetRevisionId()
+  except ManifestInvalidRevisionError:
+    lrev = ''
+  setenv('REPO_LREV', lrev)
   setenv('REPO_RREV', project.revisionExpr)
   setenv('REPO_UPSTREAM', project.upstream)
   setenv('REPO_DEST_BRANCH', project.dest_branch)
@@ -313,10 +333,12 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
   else:
     stderr = subprocess.DEVNULL
 
+  stdin = None if opt.interactive else subprocess.DEVNULL
+
   result = subprocess.run(
       cmd, cwd=cwd, shell=shell, env=env, check=False,
       encoding='utf-8', errors='replace',
-      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr)
+      stdin=stdin, stdout=subprocess.PIPE, stderr=stderr)
 
   output = result.stdout
   if opt.project_header:

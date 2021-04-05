@@ -127,10 +127,8 @@ to update the working directory files.
     g.add_option('--clone-filter', action='store', default='blob:none',
                  dest='clone_filter',
                  help='filter for use with --partial-clone [default: %default]')
-    # TODO(vapier): Expose option with real help text once this has been in the
-    # wild for a while w/out significant bug reports.  Goal is by ~Sep 2020.
     g.add_option('--worktree', action='store_true',
-                 help=optparse.SUPPRESS_HELP)
+                 help='use git-worktree to manage projects')
     g.add_option('--archive',
                  dest='archive', action='store_true',
                  help='checkout an archive instead of a git repository for '
@@ -185,10 +183,15 @@ to update the working directory files.
     return {'REPO_MANIFEST_URL': 'manifest_url',
             'REPO_MIRROR_LOCATION': 'reference'}
 
-  def _CloneSuperproject(self):
-    """Clone the superproject based on the superproject's url and branch."""
+  def _CloneSuperproject(self, opt):
+    """Clone the superproject based on the superproject's url and branch.
+
+    Args:
+      opt: Program options returned from optparse.  See _Options().
+    """
     superproject = git_superproject.Superproject(self.manifest,
-                                                 self.repodir)
+                                                 self.repodir,
+                                                 quiet=opt.quiet)
     if not superproject.Sync():
       print('error: git update of superproject failed', file=sys.stderr)
       sys.exit(1)
@@ -264,7 +267,7 @@ to update the working directory files.
 
     groups = [x for x in groups if x]
     groupstr = ','.join(groups)
-    if opt.platform == 'auto' and groupstr == 'default,platform-' + platform.system().lower():
+    if opt.platform == 'auto' and groupstr == self.manifest.GetDefaultGroupsStr():
       groupstr = None
     m.config.SetString('manifest.groups', groupstr)
 
@@ -553,7 +556,7 @@ to update the working directory files.
     self._LinkManifest(opt.manifest_name)
 
     if self.manifest.manifestProject.config.GetBoolean('repo.superproject'):
-      self._CloneSuperproject()
+      self._CloneSuperproject(opt)
 
     if os.isatty(0) and os.isatty(1) and not self.manifest.IsMirror:
       if opt.config_name or self._ShouldConfigureUser(opt):

@@ -14,6 +14,7 @@
 
 import itertools
 import os
+import platform
 import re
 import sys
 import xml.dom.minidom
@@ -604,6 +605,17 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
   def HasSubmodules(self):
     return self.manifestProject.config.GetBoolean('repo.submodules')
 
+  def GetDefaultGroupsStr(self):
+    """Returns the default group string for the platform."""
+    return 'default,platform-' + platform.system().lower()
+
+  def GetGroupsStr(self):
+    """Returns the manifest group string that should be synced."""
+    groups = self.manifestProject.config.GetString('manifest.groups')
+    if not groups:
+      groups = self.GetDefaultGroupsStr()
+    return groups
+
   def _Unload(self):
     self._loaded = False
     self._projects = {}
@@ -1027,7 +1039,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     if not path:
       path = name
     else:
-      msg = self._CheckLocalPath(path, dir_ok=True)
+      # NB: The "." project is handled specially in Project.Sync_LocalHalf.
+      msg = self._CheckLocalPath(path, dir_ok=True, cwd_dot_ok=True)
       if msg:
         raise ManifestInvalidPathError(
             '<project> invalid "path": %s: %s' % (path, msg))
@@ -1215,7 +1228,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     # our constructed logic here.  Especially since manifest authors only use
     # / in their paths.
     resep = re.compile(r'[/%s]' % re.escape(os.path.sep))
-    parts = resep.split(path)
+    # Strip off trailing slashes as those only produce '' elements, and we use
+    # parts to look for individual bad components.
+    parts = resep.split(path.rstrip('/'))
 
     # Some people use src="." to create stable links to projects.  Lets allow
     # that but reject all other uses of "." to keep things simple.

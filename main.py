@@ -254,6 +254,7 @@ class _Repo(object):
     cmd_event = cmd.event_log.Add(name, event_log.TASK_COMMAND, start)
     cmd.event_log.SetParent(cmd_event)
     git_trace2_event_log.StartEvent()
+    git_trace2_event_log.CommandEvent(name='repo', subcommands=[name])
 
     try:
       cmd.ValidateOptions(copts, cargs)
@@ -297,6 +298,8 @@ class _Repo(object):
 
       cmd.event_log.FinishEvent(cmd_event, finish,
                                 result is None or result == 0)
+      git_trace2_event_log.DefParamRepoEvents(
+          cmd.manifest.manifestProject.config.DumpConfigDict())
       git_trace2_event_log.ExitEvent(result)
 
       if gopts.event_log:

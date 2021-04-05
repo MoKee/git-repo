@@ -863,7 +863,7 @@ class Project(object):
       out.nl()
       out.project('project %s/' % self.relpath)
       out.nl()
-      out.write(p.stdout)
+      out.write('%s', p.stdout)
     return p.Wait() == 0
 
 # Publish / Upload ##
@@ -1226,6 +1226,18 @@ class Project(object):
     all_refs = self.bare_ref.all
     self.CleanPublishedCache(all_refs)
     revid = self.GetRevisionId(all_refs)
+
+    # Special case the root of the repo client checkout.  Make sure it doesn't
+    # contain files being checked out to dirs we don't allow.
+    if self.relpath == '.':
+      PROTECTED_PATHS = {'.repo'}
+      paths = set(self.work_git.ls_tree('-z', '--name-only', '--', revid).split('\0'))
+      bad_paths = paths & PROTECTED_PATHS
+      if bad_paths:
+        syncbuf.fail(self,
+                     'Refusing to checkout project that writes to protected '
+                     'paths: %s' % (', '.join(bad_paths),))
+        return
 
     def _doff():
       self._FastForward(revid)
@@ -1697,6 +1709,11 @@ class Project(object):
         name = name[len(R_HEADS):]
         if cb is None or name != cb:
           kill.append(name)
+
+    # Minor optimization: If there's nothing to prune, then don't try to read
+    # any project state.
+    if not kill and not cb:
+      return []
 
     rev = self.GetRevisionId(left)
     if cb is not None \
