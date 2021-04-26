@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing
 import os
 import optparse
 import platform
@@ -21,6 +22,7 @@ import sys
 from event_log import EventLog
 from error import NoSuchProjectError
 from error import InvalidProjectGroupsError
+import progress
 
 
 # Number of projects to submit to a single worker process at a time.
@@ -84,17 +86,33 @@ class Command(object):
         usage = 'repo %s' % self.NAME
       epilog = 'Run `repo help %s` to view the detailed manual.' % self.NAME
       self._optparse = optparse.OptionParser(usage=usage, epilog=epilog)
+      self._CommonOptions(self._optparse)
       self._Options(self._optparse)
     return self._optparse
 
-  def _Options(self, p):
-    """Initialize the option parser.
+  def _CommonOptions(self, p, opt_v=True):
+    """Initialize the option parser with common options.
+
+    These will show up for *all* subcommands, so use sparingly.
+    NB: Keep in sync with repo:InitParser().
     """
+    g = p.add_option_group('Logging options')
+    opts = ['-v'] if opt_v else []
+    g.add_option(*opts, '--verbose',
+                 dest='output_mode', action='store_true',
+                 help='show all output')
+    g.add_option('-q', '--quiet',
+                 dest='output_mode', action='store_false',
+                 help='only show errors')
+
     if self.PARALLEL_JOBS is not None:
       p.add_option(
           '-j', '--jobs',
           type=int, default=self.PARALLEL_JOBS,
           help='number of jobs to run in parallel (default: %s)' % self.PARALLEL_JOBS)
+
+  def _Options(self, p):
+    """Initialize the option parser with subcommand-specific options."""
 
   def _RegisteredEnvironmentOptions(self):
     """Get options that can be set from environment variables.
@@ -120,6 +138,11 @@ class Command(object):
     self.OptionParser.print_usage()
     sys.exit(1)
 
+  def CommonValidateOptions(self, opt, args):
+    """Validate common options."""
+    opt.quiet = opt.output_mode is False
+    opt.verbose = opt.output_mode is True
+
   def ValidateOptions(self, opt, args):
     """Validate the user options & arguments before executing.
 
@@ -134,6 +157,44 @@ class Command(object):
     """Perform the action, after option parsing is complete.
     """
     raise NotImplementedError
+
+  @staticmethod
+  def ExecuteInParallel(jobs, func, inputs, callback, output=None, ordered=False):
+    """Helper for managing parallel execution boiler plate.
+
+    For subcommands that can easily split their work up.
+
+    Args:
+      jobs: How many parallel processes to use.
+      func: The function to apply to each of the |inputs|.  Usually a
+          functools.partial for wrapping additional arguments.  It will be run
+          in a separate process, so it must be pickalable, so nested functions
+          won't work.  Methods on the subcommand Command class should work.
+      inputs: The list of items to process.  Must be a list.
+      callback: The function to pass the results to for processing.  It will be
+          executed in the main thread and process the results of |func| as they
+          become available.  Thus it may be a local nested function.  Its return
+          value is passed back directly.  It takes three arguments:
+          - The processing pool (or None with one job).
+          - The |output| argument.
+          - An iterator for the results.
+      output: An output manager.  May be progress.Progess or color.Coloring.
+      ordered: Whether the jobs should be processed in order.
+
+    Returns:
+      The |callback| function's results are returned.
+    """
+    try:
+      # NB: Multiprocessing is heavy, so don't spin it up for one job.
+      if len(inputs) == 1 or jobs == 1:
+        return callback(None, output, (func(x) for x in inputs))
+      else:
+        with multiprocessing.Pool(jobs) as pool:
+          submit = pool.imap if ordered else pool.imap_unordered
+          return callback(pool, output, submit(func, inputs, chunksize=WORKER_BATCH_SIZE))
+    finally:
+      if isinstance(output, progress.Progress):
+        output.end()
 
   def _ResetPathToProjectMap(self, projects):
     self._by_path = dict((p.worktree, p) for p in projects)

@@ -42,17 +42,25 @@ def duration_str(total):
 
 
 class Progress(object):
-  def __init__(self, title, total=0, units='', print_newline=False):
+  def __init__(self, title, total=0, units='', print_newline=False, delay=True,
+               quiet=False):
     self._title = title
     self._total = total
     self._done = 0
     self._start = time()
-    self._show = False
+    self._show = not delay
     self._units = units
     self._print_newline = print_newline
     # Only show the active jobs section if we run more than one in parallel.
     self._show_jobs = False
     self._active = 0
+
+    # When quiet, never show any output.  It's a bit hacky, but reusing the
+    # existing logic that delays initial output keeps the rest of the class
+    # clean.  Basically we set the start time to years in the future.
+    if quiet:
+      self._show = False
+      self._start += 2**32
 
   def start(self, name):
     self._active += 1

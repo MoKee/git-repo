@@ -32,7 +32,7 @@ with open(os.path.join(TOPDIR, 'README.md')) as fp:
 # https://packaging.python.org/tutorials/packaging-projects/
 setuptools.setup(
     name='repo',
-    version='1.13.8',
+    version='2',
     maintainer='Various',
     maintainer_email='repo-discuss@googlegroups.com',
     description='Repo helps manage many Git repositories',
@@ -56,6 +56,6 @@ setuptools.setup(
         'Programming Language :: Python :: 3 :: Only',
         'Topic :: Software Development :: Version Control :: Git',
     ],
-    python_requires='>=3.6',
+    python_requires='>=3.5',
     packages=['subcmds'],
 )

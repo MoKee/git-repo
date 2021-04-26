@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import sys
 
 from color import Coloring
-from command import PagedCommand
+from command import DEFAULT_LOCAL_JOBS, PagedCommand
 from error import GitError
 from git_command import GitCommand
 
@@ -61,6 +62,7 @@ contain a line that matches both expressions:
   repo grep --all-match -e NODE -e Unexpected
 
 """
+  PARALLEL_JOBS = DEFAULT_LOCAL_JOBS
 
   @staticmethod
   def _carry_option(_option, opt_str, value, parser):
@@ -78,6 +80,10 @@ contain a line that matches both expressions:
 
     if value is not None:
       pt.append(value)
+
+  def _CommonOptions(self, p):
+    """Override common options slightly."""
+    super()._CommonOptions(p, opt_v=False)
 
   def _Options(self, p):
     g = p.add_option_group('Sources')
@@ -152,6 +158,72 @@ contain a line that matches both expressions:
                  action='callback', callback=self._carry_option,
                  help='Show only file names not containing matching lines')
 
+  def _ExecuteOne(self, cmd_argv, project):
+    """Process one project."""
+    try:
+      p = GitCommand(project,
+                     cmd_argv,
+                     bare=False,
+                     capture_stdout=True,
+                     capture_stderr=True)
+    except GitError as e:
+      return (project, -1, None, str(e))
+
+    return (project, p.Wait(), p.stdout, p.stderr)
+
+  @staticmethod
+  def _ProcessResults(full_name, have_rev, _pool, out, results):
+    git_failed = False
+    bad_rev = False
+    have_match = False
+
+    for project, rc, stdout, stderr in results:
+      if rc < 0:
+        git_failed = True
+        out.project('--- project %s ---' % project.relpath)
+        out.nl()
+        out.fail('%s', stderr)
+        out.nl()
+        continue
+
+      if rc:
+        # no results
+        if stderr:
+          if have_rev and 'fatal: ambiguous argument' in stderr:
+            bad_rev = True
+          else:
+            out.project('--- project %s ---' % project.relpath)
+            out.nl()
+            out.fail('%s', stderr.strip())
+            out.nl()
+        continue
+      have_match = True
+
+      # We cut the last element, to avoid a blank line.
+      r = stdout.split('\n')
+      r = r[0:-1]
+
+      if have_rev and full_name:
+        for line in r:
+          rev, line = line.split(':', 1)
+          out.write("%s", rev)
+          out.write(':')
+          out.project(project.relpath)
+          out.write('/')
+          out.write("%s", line)
+          out.nl()
+      elif full_name:
+        for line in r:
+          out.project(project.relpath)
+          out.write('/')
+          out.write("%s", line)
+          out.nl()
+      else:
+        for line in r:
+          print(line)
+
+    return (git_failed, bad_rev, have_match)
+
   def Execute(self, opt, args):
     out = GrepColoring(self.manifest.manifestProject.config)
 
@@ -183,62 +255,13 @@ contain a line that matches both expressions:
       cmd_argv.extend(opt.revision)
     cmd_argv.append('--')
 
-    git_failed = False
-    bad_rev = False
-    have_match = False
-
-    for project in projects:
-      try:
-        p = GitCommand(project,
-                       cmd_argv,
-                       bare=False,
-                       capture_stdout=True,
-                       capture_stderr=True)
-      except GitError as e:
-        git_failed = True
-        out.project('--- project %s ---' % project.relpath)
-        out.nl()
-        out.fail('%s', str(e))
-        out.nl()
-        continue
-
-      if p.Wait() != 0:
-        # no results
-        #
-        if p.stderr:
-          if have_rev and 'fatal: ambiguous argument' in p.stderr:
-            bad_rev = True
-          else:
-            out.project('--- project %s ---' % project.relpath)
-            out.nl()
-            out.fail('%s', p.stderr.strip())
-            out.nl()
-        continue
-      have_match = True
-
-      # We cut the last element, to avoid a blank line.
-      #
-      r = p.stdout.split('\n')
-      r = r[0:-1]
-
-      if have_rev and full_name:
-        for line in r:
-          rev, line = line.split(':', 1)
-          out.write("%s", rev)
-          out.write(':')
-          out.project(project.relpath)
-          out.write('/')
-          out.write("%s", line)
-          out.nl()
-      elif full_name:
-        for line in r:
-          out.project(project.relpath)
-          out.write('/')
-          out.write("%s", line)
-          out.nl()
-      else:
-        for line in r:
-          print(line)
+    git_failed, bad_rev, have_match = self.ExecuteInParallel(
+        opt.jobs,
+        functools.partial(self._ExecuteOne, cmd_argv),
+        projects,
+        callback=functools.partial(self._ProcessResults, full_name, have_rev),
+        output=out,
+        ordered=True)
 
     if git_failed:
       sys.exit(1)

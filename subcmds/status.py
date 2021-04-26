@@ -15,10 +15,9 @@
 import functools
 import glob
 import io
-import multiprocessing
 import os
 
-from command import DEFAULT_LOCAL_JOBS, PagedCommand, WORKER_BATCH_SIZE
+from command import DEFAULT_LOCAL_JOBS, PagedCommand
 
 from color import Coloring
 import platform_utils
@@ -80,12 +79,9 @@ the following meanings:
   PARALLEL_JOBS = DEFAULT_LOCAL_JOBS
 
   def _Options(self, p):
-    super()._Options(p)
     p.add_option('-o', '--orphans',
                  dest='orphans', action='store_true',
                  help="include objects in working directory outside of repo projects")
-    p.add_option('-q', '--quiet', action='store_true',
-                 help="only print the name of modified projects")
 
   def _StatusHelper(self, quiet, project):
     """Obtains the status for a specific project.
@@ -122,22 +118,23 @@ the following meanings:
 
   def Execute(self, opt, args):
     all_projects = self.GetProjects(args)
-    counter = 0
 
-    if opt.jobs == 1:
-      for project in all_projects:
-        state = project.PrintWorkTreeStatus(quiet=opt.quiet)
+    def _ProcessResults(_pool, _output, results):
+      ret = 0
+      for (state, output) in results:
+        if output:
+          print(output, end='')
         if state == 'CLEAN':
-          counter += 1
-    else:
-      with multiprocessing.Pool(opt.jobs) as pool:
-        states = pool.imap(functools.partial(self._StatusHelper, opt.quiet),
-                           all_projects, chunksize=WORKER_BATCH_SIZE)
-        for (state, output) in states:
-          if output:
-            print(output, end='')
-          if state == 'CLEAN':
-            counter += 1
+          ret += 1
+      return ret
+
+    counter = self.ExecuteInParallel(
+        opt.jobs,
+        functools.partial(self._StatusHelper, opt.quiet),
+        all_projects,
+        callback=_ProcessResults,
+        ordered=True)
+
     if not opt.quiet and len(all_projects) == counter:
       print('nothing to commit (working directory clean)')
 

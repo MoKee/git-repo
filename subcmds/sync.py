@@ -20,9 +20,7 @@ import multiprocessing
 import netrc
 from optparse import SUPPRESS_HELP
 import os
-import re
 import socket
-import subprocess
 import sys
 import tempfile
 import time
@@ -45,13 +43,8 @@ except ImportError:
   def _rlimit_nofile():
     return (256, 256)
 
-try:
-  import multiprocessing
-except ImportError:
-  multiprocessing = None
-
 import event_log
-from git_command import GIT, git_require
+from git_command import git_require
 from git_config import GetUrlCookieFile
 from git_refs import R_HEADS, HEAD
 import git_superproject
@@ -67,10 +60,6 @@ from wrapper import Wrapper
 from manifest_xml import GitcManifest
 
 _ONE_DAY_S = 24 * 60 * 60
-
-
-class _FetchError(Exception):
-  """Internal error thrown in _FetchHelper() when we don't want stack trace."""
 
 
 class Sync(Command, MirrorSafeCommand):
@@ -178,12 +167,18 @@ later is required to fix a server side protocol bug.
 """
   PARALLEL_JOBS = 1
 
-  def _Options(self, p, show_smart=True):
+  def _CommonOptions(self, p):
     try:
       self.PARALLEL_JOBS = self.manifest.default.sync_j
     except ManifestParseError:
       pass
-    super()._Options(p)
+    super()._CommonOptions(p)
+
+  def _Options(self, p, show_smart=True):
+    p.add_option('--jobs-network', default=None, type=int, metavar='JOBS',
+                 help='number of network jobs to run in parallel (defaults to --jobs)')
+    p.add_option('--jobs-checkout', default=None, type=int, metavar='JOBS',
+                 help='number of local checkout jobs to run in parallel (defaults to --jobs)')
 
     p.add_option('-f', '--force-broken',
                  dest='force_broken', action='store_true',
@@ -217,12 +212,6 @@ later is required to fix a server side protocol bug.
     p.add_option('-c', '--current-branch',
                  dest='current_branch_only', action='store_true',
                  help='fetch only current branch from server')
-    p.add_option('-v', '--verbose',
-                 dest='output_mode', action='store_true',
-                 help='show all sync output')
-    p.add_option('-q', '--quiet',
-                 dest='output_mode', action='store_false',
-                 help='only show errors')
     p.add_option('-m', '--manifest-name',
                  dest='manifest_name',
                  help='temporary manifest to use for this sync', metavar='NAME.xml')
@@ -315,149 +304,123 @@ later is required to fix a server side protocol bug.
     self._ReloadManifest(manifest_path)
     return manifest_path
 
-  def _FetchProjectList(self, opt, projects, sem, *args, **kwargs):
-    """Main function of the fetch threads.
+  def _FetchProjectList(self, opt, projects):
+    """Main function of the fetch worker.
+
+    The projects we're given share the same underlying git object store, so we
+    have to fetch them in serial.
 
     Delegates most of the work to _FetchHelper.
 
     Args:
       opt: Program options returned from optparse.  See _Options().
       projects: Projects to fetch.
-      sem: We'll release() this semaphore when we exit so that another thread
-          can be started up.
-      *args, **kwargs: Remaining arguments to pass to _FetchHelper. See the
-          _FetchHelper docstring for details.
     """
-    try:
-        for project in projects:
-          success = self._FetchHelper(opt, project, *args, **kwargs)
-          if not success and opt.fail_fast:
-            break
-    finally:
-        sem.release()
+    return [self._FetchOne(opt, x) for x in projects]
 
-  def _FetchHelper(self, opt, project, lock, fetched, pm, err_event,
-                   clone_filter):
+  def _FetchOne(self, opt, project):
     """Fetch git objects for a single project.
 
     Args:
       opt: Program options returned from optparse.  See _Options().
       project: Project object for the project to fetch.
-      lock: Lock for accessing objects that are shared amongst multiple
-          _FetchHelper() threads.
-      fetched: set object that we will add project.gitdir to when we're done
-          (with our lock held).
-      pm: Instance of a Project object.  We will call pm.update() (with our
-          lock held).
-      err_event: We'll set this event in the case of an error (after printing
-          out info about the error).
-      clone_filter: Filter for use in a partial clone.
 
     Returns:
       Whether the fetch was successful.
     """
-    # We'll set to true once we've locked the lock.
-    did_lock = False
-
-    # Encapsulate everything in a try/except/finally so that:
-    # - We always set err_event in the case of an exception.
-    # - We always make sure we unlock the lock if we locked it.
     start = time.time()
     success = False
     buf = io.StringIO()
-    with lock:
-      pm.start(project.name)
     try:
-      try:
-        success = project.Sync_NetworkHalf(
-            quiet=opt.quiet,
-            verbose=opt.verbose,
-            output_redir=buf,
-            current_branch_only=self._GetCurrentBranchOnly(opt),
-            force_sync=opt.force_sync,
-            clone_bundle=opt.clone_bundle,
-            tags=opt.tags, archive=self.manifest.IsArchive,
-            optimized_fetch=opt.optimized_fetch,
-            retry_fetches=opt.retry_fetches,
-            prune=opt.prune,
-            clone_filter=clone_filter)
-        self._fetch_times.Set(project, time.time() - start)
+      success = project.Sync_NetworkHalf(
+          quiet=opt.quiet,
+          verbose=opt.verbose,
+          output_redir=buf,
+          current_branch_only=self._GetCurrentBranchOnly(opt),
+          force_sync=opt.force_sync,
+          clone_bundle=opt.clone_bundle,
+          tags=opt.tags, archive=self.manifest.IsArchive,
+          optimized_fetch=opt.optimized_fetch,
+          retry_fetches=opt.retry_fetches,
+          prune=opt.prune,
+          clone_filter=self.manifest.CloneFilter,
+          partial_clone_exclude=self.manifest.PartialCloneExclude)
 
-        # Lock around all the rest of the code, since printing, updating a set
-        # and Progress.update() are not thread safe.
-        lock.acquire()
-        did_lock = True
+      output = buf.getvalue()
+      if opt.verbose and output:
+        print('\n' + output.rstrip())
 
-        output = buf.getvalue()
-        if opt.verbose and output:
-          pm.update(inc=0, msg=output.rstrip())
+      if not success:
+        print('error: Cannot fetch %s from %s'
+              % (project.name, project.remote.url),
+              file=sys.stderr)
+    except GitError as e:
+      print('error.GitError: Cannot fetch %s' % str(e), file=sys.stderr)
+    except Exception as e:
+      print('error: Cannot fetch %s (%s: %s)'
+            % (project.name, type(e).__name__, str(e)), file=sys.stderr)
+      raise
 
-        if not success:
-          err_event.set()
-          print('error: Cannot fetch %s from %s'
-                % (project.name, project.remote.url),
-                file=sys.stderr)
-          if opt.fail_fast:
-            raise _FetchError()
-
-        fetched.add(project.gitdir)
-      except _FetchError:
-        pass
-      except Exception as e:
-        print('error: Cannot fetch %s (%s: %s)'
-              % (project.name, type(e).__name__, str(e)), file=sys.stderr)
-        err_event.set()
-        raise
-    finally:
-      if not did_lock:
-        lock.acquire()
-      pm.finish(project.name)
-      lock.release()
-      finish = time.time()
-      self.event_log.AddSync(project, event_log.TASK_SYNC_NETWORK,
-                             start, finish, success)
-
-    return success
+    finish = time.time()
+    return (success, project, start, finish)
 
   def _Fetch(self, projects, opt, err_event):
+    ret = True
+
+    jobs = opt.jobs_network if opt.jobs_network else self.jobs
     fetched = set()
-    lock = _threading.Lock()
-    pm = Progress('Fetching', len(projects),
-                  print_newline=not(opt.quiet))
+    pm = Progress('Fetching', len(projects), delay=False, quiet=opt.quiet)
 
     objdir_project_map = dict()
     for project in projects:
       objdir_project_map.setdefault(project.objdir, []).append(project)
+    projects_list = list(objdir_project_map.values())
 
-    threads = set()
-    sem = _threading.Semaphore(self.jobs)
-    for project_list in objdir_project_map.values():
-      # Check for any errors before running any more tasks.
-      # ...we'll let existing threads finish, though.
-      if err_event.is_set() and opt.fail_fast:
-        break
+    def _ProcessResults(results_sets):
+      ret = True
+      for results in results_sets:
+        for (success, project, start, finish) in results:
+          self._fetch_times.Set(project, finish - start)
+          self.event_log.AddSync(project, event_log.TASK_SYNC_NETWORK,
+                                 start, finish, success)
+          # Check for any errors before running any more tasks.
+          # ...we'll let existing jobs finish, though.
+          if not success:
+            ret = False
+          else:
+            fetched.add(project.gitdir)
+          pm.update(msg=project.name)
+        if not ret and opt.fail_fast:
+          break
+      return ret
 
-      sem.acquire()
-      kwargs = dict(opt=opt,
-                    projects=project_list,
-                    sem=sem,
-                    lock=lock,
-                    fetched=fetched,
-                    pm=pm,
-                    err_event=err_event,
-                    clone_filter=self.manifest.CloneFilter)
-      if self.jobs > 1:
-        t = _threading.Thread(target=self._FetchProjectList,
-                              kwargs=kwargs)
-        # Ensure that Ctrl-C will not freeze the repo process.
-        t.daemon = True
-        threads.add(t)
-        t.start()
+    # NB: Multiprocessing is heavy, so don't spin it up for one job.
+    if len(projects_list) == 1 or jobs == 1:
+      if not _ProcessResults(self._FetchProjectList(opt, x) for x in projects_list):
+        ret = False
+    else:
+      # Favor throughput over responsiveness when quiet.  It seems that imap()
+      # will yield results in batches relative to chunksize, so even as the
+      # children finish a sync, we won't see the result until one child finishes
+      # ~chunksize jobs.  When using a large --jobs with large chunksize, this
+      # can be jarring as there will be a large initial delay where repo looks
+      # like it isn't doing anything and sits at 0%, but then suddenly completes
+      # a lot of jobs all at once.  Since this code is more network bound, we
+      # can accept a bit more CPU overhead with a smaller chunksize so that the
+      # user sees more immediate & continuous feedback.
+      if opt.quiet:
+        chunksize = WORKER_BATCH_SIZE
       else:
-        self._FetchProjectList(**kwargs)
-
-    for t in threads:
-      t.join()
+        pm.update(inc=0, msg='warming up')
+        chunksize = 4
+      with multiprocessing.Pool(jobs) as pool:
+        results = pool.imap_unordered(
+            functools.partial(self._FetchProjectList, opt),
+            projects_list,
+            chunksize=chunksize)
+        if not _ProcessResults(results):
+          ret = False
+          pool.close()
 
     pm.end()
     self._fetch_times.Save()
@@ -465,13 +428,14 @@ later is required to fix a server side protocol bug.
     if not self.manifest.IsArchive:
       self._GCProjects(projects, opt, err_event)
 
-    return fetched
+    return (ret, fetched)
 
-  def _CheckoutOne(self, opt, project):
+  def _CheckoutOne(self, detach_head, force_sync, project):
     """Checkout work tree for one project
 
     Args:
-      opt: Program options returned from optparse.  See _Options().
+      detach_head: Whether to leave a detached HEAD.
+      force_sync: Force checking out of the repo.
       project: Project object for the project to checkout.
 
     Returns:
@@ -479,11 +443,14 @@ later is required to fix a server side protocol bug.
     """
     start = time.time()
     syncbuf = SyncBuffer(self.manifest.manifestProject.config,
-                         detach_head=opt.detach_head)
+                         detach_head=detach_head)
     success = False
     try:
-      project.Sync_LocalHalf(syncbuf, force_sync=opt.force_sync)
+      project.Sync_LocalHalf(syncbuf, force_sync=force_sync)
       success = syncbuf.Finish()
+    except GitError as e:
+      print('error.GitError: Cannot checkout %s: %s' %
+            (project.name, str(e)), file=sys.stderr)
     except Exception as e:
       print('error: Cannot checkout %s: %s: %s' %
             (project.name, type(e).__name__, str(e)),
@@ -503,73 +470,66 @@ later is required to fix a server side protocol bug.
       opt: Program options returned from optparse.  See _Options().
       err_results: A list of strings, paths to git repos where checkout failed.
     """
-    ret = True
-
     # Only checkout projects with worktrees.
     all_projects = [x for x in all_projects if x.worktree]
 
-    pm = Progress('Checking out', len(all_projects))
-
-    def _ProcessResults(results):
+    def _ProcessResults(pool, pm, results):
+      ret = True
       for (success, project, start, finish) in results:
         self.event_log.AddSync(project, event_log.TASK_SYNC_LOCAL,
                                start, finish, success)
         # Check for any errors before running any more tasks.
-        # ...we'll let existing threads finish, though.
+        # ...we'll let existing jobs finish, though.
         if not success:
+          ret = False
           err_results.append(project.relpath)
           if opt.fail_fast:
-            return False
+            if pool:
+              pool.close()
+            return ret
         pm.update(msg=project.name)
-      return True
+      return ret
 
-    # NB: Multiprocessing is heavy, so don't spin it up for one job.
-    if len(all_projects) == 1 or opt.jobs == 1:
-      if not _ProcessResults(self._CheckoutOne(opt, x) for x in all_projects):
-        ret = False
-    else:
-      with multiprocessing.Pool(opt.jobs) as pool:
-        results = pool.imap_unordered(
-            functools.partial(self._CheckoutOne, opt),
-            all_projects,
-            chunksize=WORKER_BATCH_SIZE)
-        if not _ProcessResults(results):
-          ret = False
-          pool.close()
-
-    pm.end()
-
-    return ret and not err_results
+    return self.ExecuteInParallel(
+        opt.jobs_checkout if opt.jobs_checkout else self.jobs,
+        functools.partial(self._CheckoutOne, opt.detach_head, opt.force_sync),
+        all_projects,
+        callback=_ProcessResults,
+        output=Progress('Checking out', len(all_projects), quiet=opt.quiet)) and not err_results
 
   def _GCProjects(self, projects, opt, err_event):
+    pm = Progress('Garbage collecting', len(projects), delay=False, quiet=opt.quiet)
+    pm.update(inc=0, msg='prescan')
+
     gc_gitdirs = {}
     for project in projects:
       # Make sure pruning never kicks in with shared projects.
       if (not project.use_git_worktrees and
               len(project.manifest.GetProjectsWithName(project.name)) > 1):
         if not opt.quiet:
-          print('%s: Shared project %s found, disabling pruning.' %
+          print('\r%s: Shared project %s found, disabling pruning.' %
                 (project.relpath, project.name))
         if git_require((2, 7, 0)):
           project.EnableRepositoryExtension('preciousObjects')
         else:
           # This isn't perfect, but it's the best we can do with old git.
-          print('%s: WARNING: shared projects are unreliable when using old '
+          print('\r%s: WARNING: shared projects are unreliable when using old '
                 'versions of git; please upgrade to git-2.7.0+.'
                 % (project.relpath,),
                 file=sys.stderr)
           project.config.SetString('gc.pruneExpire', 'never')
       gc_gitdirs[project.gitdir] = project.bare_git
 
-    if multiprocessing:
-      cpu_count = multiprocessing.cpu_count()
-    else:
-      cpu_count = 1
+    pm.update(inc=len(projects) - len(gc_gitdirs), msg='warming up')
+
+    cpu_count = os.cpu_count()
     jobs = min(self.jobs, cpu_count)
 
     if jobs < 2:
       for bare_git in gc_gitdirs.values():
+        pm.update(msg=bare_git._project.name)
         bare_git.gc('--auto')
+      pm.end()
       return
 
     config = {'pack.threads': cpu_count // jobs if cpu_count > jobs else 1}
@@ -578,6 +538,7 @@ later is required to fix a server side protocol bug.
     sem = _threading.Semaphore(jobs)
 
     def GC(bare_git):
+      pm.start(bare_git._project.name)
       try:
         try:
           bare_git.gc('--auto', config=config)
@@ -587,6 +548,7 @@ later is required to fix a server side protocol bug.
           err_event.set()
           raise
       finally:
+        pm.finish(bare_git._project.name)
         sem.release()
 
     for bare_git in gc_gitdirs.values():
@@ -600,6 +562,7 @@ later is required to fix a server side protocol bug.
 
     for t in threads:
       t.join()
+    pm.end()
 
   def _ReloadManifest(self, manifest_name=None):
     if manifest_name:
@@ -752,7 +715,8 @@ later is required to fix a server side protocol bug.
                                     optimized_fetch=opt.optimized_fetch,
                                     retry_fetches=opt.retry_fetches,
                                     submodules=self.manifest.HasSubmodules,
-                                    clone_filter=self.manifest.CloneFilter)
+                                    clone_filter=self.manifest.CloneFilter,
+                                    partial_clone_exclude=self.manifest.PartialCloneExclude)
       finish = time.time()
       self.event_log.AddSync(mp, event_log.TASK_SYNC_NETWORK,
                              start, finish, success)
@@ -794,9 +758,6 @@ later is required to fix a server side protocol bug.
     if self.jobs > 1:
       soft_limit, _ = _rlimit_nofile()
       self.jobs = min(self.jobs, (soft_limit - 5) // 3)
-
-    opt.quiet = opt.output_mode is False
-    opt.verbose = opt.output_mode is True
 
     if opt.manifest_name:
       self.manifest.Override(opt.manifest_name)
@@ -895,7 +856,9 @@ later is required to fix a server side protocol bug.
       to_fetch.extend(all_projects)
       to_fetch.sort(key=self._fetch_times.Get, reverse=True)
 
-      fetched = self._Fetch(to_fetch, opt, err_event)
+      success, fetched = self._Fetch(to_fetch, opt, err_event)
+      if not success:
+        err_event.set()
 
       _PostRepoFetch(rp, opt.repo_verify)
       if opt.network_only:
@@ -924,7 +887,10 @@ later is required to fix a server side protocol bug.
         if previously_missing_set == missing_set:
           break
         previously_missing_set = missing_set
-        fetched.update(self._Fetch(missing, opt, err_event))
+        success, new_fetched = self._Fetch(to_fetch, opt, err_event)
+        if not success:
+          err_event.set()
+        fetched.update(new_fetched)
 
       # If we saw an error, exit with code 1 so that other scripts can check.
       if err_event.is_set():
@@ -990,12 +956,25 @@ def _PostRepoUpgrade(manifest, quiet=False):
 def _PostRepoFetch(rp, repo_verify=True, verbose=False):
   if rp.HasChanges:
     print('info: A new version of repo is available', file=sys.stderr)
-    print(file=sys.stderr)
-    if not repo_verify or _VerifyTag(rp):
-      syncbuf = SyncBuffer(rp.config)
-      rp.Sync_LocalHalf(syncbuf)
-      if not syncbuf.Finish():
-        sys.exit(1)
+    wrapper = Wrapper()
+    try:
+      rev = rp.bare_git.describe(rp.GetRevisionId())
+    except GitError:
+      rev = None
+    _, new_rev = wrapper.check_repo_rev(rp.gitdir, rev, repo_verify=repo_verify)
+    # See if we're held back due to missing signed tag.
+    current_revid = rp.bare_git.rev_parse('HEAD')
+    new_revid = rp.bare_git.rev_parse('--verify', new_rev)
+    if current_revid != new_revid:
+      # We want to switch to the new rev, but also not trash any uncommitted
+      # changes.  This helps with local testing/hacking.
+      # If a local change has been made, we will throw that away.
+      # We also have to make sure this will switch to an older commit if that's
+      # the latest tag in order to support release rollback.
+      try:
+        rp.work_git.reset('--keep', new_rev)
+      except GitError as e:
+        sys.exit(str(e))
       print('info: Restarting repo with latest version', file=sys.stderr)
       raise RepoChangedException(['--repo-upgraded'])
     else:
@@ -1004,45 +983,6 @@ def _PostRepoFetch(rp, repo_verify=True, verbose=False):
     if verbose:
       print('repo version %s is current' % rp.work_git.describe(HEAD),
             file=sys.stderr)
-
-
-def _VerifyTag(project):
-  gpg_dir = os.path.expanduser('~/.repoconfig/gnupg')
-  if not os.path.exists(gpg_dir):
-    print('warning: GnuPG was not available during last "repo init"\n'
-          'warning: Cannot automatically authenticate repo."""',
-          file=sys.stderr)
-    return True
-
-  try:
-    cur = project.bare_git.describe(project.GetRevisionId())
-  except GitError:
-    cur = None
-
-  if not cur \
-     or re.compile(r'^.*-[0-9]{1,}-g[0-9a-f]{1,}$').match(cur):
-    rev = project.revisionExpr
-    if rev.startswith(R_HEADS):
-      rev = rev[len(R_HEADS):]
-
-    print(file=sys.stderr)
-    print("warning: project '%s' branch '%s' is not signed"
-          % (project.name, rev), file=sys.stderr)
-    return False
-
-  env = os.environ.copy()
-  env['GIT_DIR'] = project.gitdir
-  env['GNUPGHOME'] = gpg_dir
-
-  cmd = [GIT, 'tag', '-v', cur]
-  result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          env=env, check=False)
-  if result.returncode:
-    print(file=sys.stderr)
-    print(result.stdout, file=sys.stderr)
-    print(file=sys.stderr)
-    return False
-  return True
 
 
 class _FetchTimes(object):

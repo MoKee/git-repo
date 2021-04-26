@@ -1050,7 +1050,8 @@ class Project(object):
                        retry_fetches=0,
                        prune=False,
                        submodules=False,
-                       clone_filter=None):
+                       clone_filter=None,
+                       partial_clone_exclude=set()):
     """Perform only the network IO portion of the sync process.
        Local working directory/branch state is not affected.
     """
@@ -1086,6 +1087,10 @@ class Project(object):
     # clone bundle download.  We should have the majority of objects already.
     if clone_bundle and os.path.exists(self.objdir):
       clone_bundle = False
+
+    if self.name in partial_clone_exclude:
+      clone_bundle = True
+      clone_filter = None
 
     if is_new is None:
       is_new = not self.Exists
@@ -2170,19 +2175,13 @@ class Project(object):
       elif (gitcmd.stdout and
             'error:' in gitcmd.stdout and
             'HTTP 429' in gitcmd.stdout):
-        if not quiet:
-          print('429 received, sleeping: %s sec' % retry_cur_sleep,
-                file=sys.stderr)
-        time.sleep(retry_cur_sleep)
-        retry_cur_sleep = min(retry_exp_factor * retry_cur_sleep,
-                              MAXIMUM_RETRY_SLEEP_SEC)
-        retry_cur_sleep *= (1 - random.uniform(-RETRY_JITTER_PERCENT,
-                                               RETRY_JITTER_PERCENT))
-        continue
+        # Fallthru to sleep+retry logic at the bottom.
+        pass
 
-      # If this is not last attempt, try 'git remote prune'.
-      elif (try_n < retry_fetches - 1 and
-            gitcmd.stdout and
+      # Try to prune remote branches once in case there are conflicts.
+      # For example, if the remote had refs/heads/upstream, but deleted that and
+      # now has refs/heads/upstream/foo.
+      elif (gitcmd.stdout and
             'error:' in gitcmd.stdout and
             'git remote prune' in gitcmd.stdout and
             not prune_tried):
@@ -2192,6 +2191,8 @@ class Project(object):
         ret = prunecmd.Wait()
         if ret:
           break
+        output_redir.write('retrying fetch after pruning remote branches')
+        # Continue right away so we don't sleep as we shouldn't need to.
         continue
       elif current_branch_only and is_sha1 and ret == 128:
         # Exit code 128 means "couldn't find the ref you asked for"; if we're
@@ -2201,9 +2202,17 @@ class Project(object):
       elif ret < 0:
         # Git died with a signal, exit immediately
         break
+
+      # Figure out how long to sleep before the next attempt, if there is one.
       if not verbose:
-        print('\n%s:\n%s' % (self.name, gitcmd.stdout), file=sys.stderr)
-      time.sleep(random.randint(30, 45))
+        output_redir.write('\n%s:\n%s' % (self.name, gitcmd.stdout), file=sys.stderr)
+      if try_n < retry_fetches - 1:
+        output_redir.write('sleeping %s seconds before retrying' % retry_cur_sleep)
+        time.sleep(retry_cur_sleep)
+        retry_cur_sleep = min(retry_exp_factor * retry_cur_sleep,
+                              MAXIMUM_RETRY_SLEEP_SEC)
+        retry_cur_sleep *= (1 - random.uniform(-RETRY_JITTER_PERCENT,
+                                               RETRY_JITTER_PERCENT))
 
     if initial:
       if alt_dir:
