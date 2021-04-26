@@ -369,7 +369,7 @@ later is required to fix a server side protocol bug.
 
     jobs = opt.jobs_network if opt.jobs_network else self.jobs
     fetched = set()
-    pm = Progress('Fetching', len(projects), delay=False, quiet=opt.quiet)
+    pm = Progress('Fetching', len(projects), delay=False, quiet=opt.quiet, print_newline=not(opt.quiet))
 
     objdir_project_map = dict()
     for project in projects:
