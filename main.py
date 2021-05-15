@@ -39,7 +39,7 @@ from color import SetDefaultColoring
 import event_log
 from repo_trace import SetTrace
 from git_command import user_agent
-from git_config import init_ssh, close_ssh, RepoConfig
+from git_config import RepoConfig
 from git_trace2_event_log import EventLog
 from command import InteractiveCommand
 from command import MirrorSafeCommand
@@ -591,20 +591,16 @@ def _Main(argv):
 
   repo = _Repo(opt.repodir)
   try:
-    try:
-      init_ssh()
-      init_http()
-      name, gopts, argv = repo._ParseArgs(argv)
-      run = lambda: repo._Run(name, gopts, argv) or 0
-      if gopts.trace_python:
-        import trace
-        tracer = trace.Trace(count=False, trace=True, timing=True,
-                             ignoredirs=set(sys.path[1:]))
-        result = tracer.runfunc(run)
-      else:
-        result = run()
-    finally:
-      close_ssh()
+    init_http()
+    name, gopts, argv = repo._ParseArgs(argv)
+    run = lambda: repo._Run(name, gopts, argv) or 0
+    if gopts.trace_python:
+      import trace
+      tracer = trace.Trace(count=False, trace=True, timing=True,
+                           ignoredirs=set(sys.path[1:]))
+      result = tracer.runfunc(run)
+    else:
+      result = run()
   except KeyboardInterrupt:
     print('aborted by user', file=sys.stderr)
     result = 1

@@ -479,6 +479,12 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         e.setAttribute('remote', remoteName)
       root.appendChild(e)
 
+    if self._contactinfo:
+      root.appendChild(doc.createTextNode(''))
+      e = doc.createElement('contactinfo')
+      e.setAttribute('bugurl', self._contactinfo['bugurl'])
+      root.appendChild(e)
+
     return doc
 
   def ToDict(self, **kwargs):
@@ -490,6 +496,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         'manifest-server',
         'repo-hooks',
         'superproject',
+        'contactinfo',
     }
     # Elements that may be repeated.
     MULTI_ELEMENTS = {
@@ -566,6 +573,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     return self._superproject
 
   @property
+  def contactinfo(self):
+    self._Load()
+    return self._contactinfo
+
+  @property
   def notice(self):
     self._Load()
     return self._notice
@@ -594,6 +606,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     exclude = self.manifest.manifestProject.config.GetString(
         'repo.partialcloneexclude') or ''
     return set(x.strip() for x in exclude.split(','))
+
+  @property
+  def HasLocalManifests(self):
+    return self._load_local_manifests and self.local_manifests
 
   @property
   def IsMirror(self):
@@ -630,6 +646,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     self._default = None
     self._repo_hooks_project = None
     self._superproject = {}
+    self._contactinfo = {}
     self._notice = None
     self.branch = None
     self._manifest_server = None
@@ -872,6 +889,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
           raise ManifestParseError("no remote for superproject %s within %s" %
                                    (name, self.manifestFile))
         self._superproject['remote'] = remote.ToRemoteSpec(name)
+      if node.nodeName == 'contactinfo':
+        bugurl = self._reqatt(node, 'bugurl')
+        # This element can be repeated, later entries will clobber earlier ones.
+        self._contactinfo['bugurl'] = bugurl
       if node.nodeName == 'remove-project':
         name = self._reqatt(node, 'name')
 
@@ -1199,6 +1220,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     if '~' in path:
       return '~ not allowed (due to 8.3 filenames on Windows filesystems)'
 
+    path_codepoints = set(path)
+
     # Some filesystems (like Apple's HFS+) try to normalize Unicode codepoints
     # which means there are alternative names for ".git".  Reject paths with
     # these in it as there shouldn't be any reasonable need for them here.
@@ -1222,9 +1245,16 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         u'\u206F',  # NOMINAL DIGIT SHAPES
         u'\uFEFF',  # ZERO WIDTH NO-BREAK SPACE
     }
-    if BAD_CODEPOINTS & set(path):
+    if BAD_CODEPOINTS & path_codepoints:
       # This message is more expansive than reality, but should be fine.
       return 'Unicode combining characters not allowed'
+
+    # Reject newlines as there shouldn't be any legitmate use for them, they'll
+    # be confusing to users, and they can easily break tools that expect to be
+    # able to iterate over newline delimited lists.  This even applies to our
+    # own code like .repo/project.list.
+    if {'\r', '\n'} & path_codepoints:
+      return 'Newlines not allowed'
 
     # Assume paths might be used on case-insensitive filesystems.
     path = path.lower()

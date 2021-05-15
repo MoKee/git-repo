@@ -26,9 +26,9 @@ import hashlib
 import os
 import sys
 
-from error import BUG_REPORT_URL
 from git_command import GitCommand
 from git_refs import R_HEADS
+from wrapper import Wrapper
 
 _SUPERPROJECT_GIT_NAME = 'superproject.git'
 _SUPERPROJECT_MANIFEST_NAME = 'superproject_override.xml'
@@ -262,9 +262,19 @@ class Superproject(object):
       return None
 
     projects_missing_commit_ids = []
+    superproject_fetchUrl = self._manifest.superproject['remote'].fetchUrl
     for project in projects:
       path = project.relpath
       if not path:
+        continue
+      # Some manifests that pull projects from the "chromium" GoB
+      # (remote="chromium"), and have a private manifest that pulls projects
+      # from both the chromium GoB and "chrome-internal" GoB (remote="chrome").
+      # For such projects, one of the remotes will be different from
+      # superproject's remote. Until superproject, supports multiple remotes,
+      # don't update the commit ids of remotes that don't match superproject's
+      # remote.
+      if project.remote.fetchUrl != superproject_fetchUrl:
         continue
       commit_id = commit_ids.get(path)
       if commit_id:
@@ -273,7 +283,7 @@ class Superproject(object):
         projects_missing_commit_ids.append(path)
     if projects_missing_commit_ids:
       print('error: please file a bug using %s to report missing commit_ids for: %s' %
-            (BUG_REPORT_URL, projects_missing_commit_ids), file=sys.stderr)
+            (Wrapper().BUG_URL, projects_missing_commit_ids), file=sys.stderr)
       return None
 
     manifest_path = self._WriteManfiestFile()

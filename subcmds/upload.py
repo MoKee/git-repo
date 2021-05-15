@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import copy
+import functools
+import optparse
 import re
 import sys
 
-from command import InteractiveCommand
+from command import DEFAULT_LOCAL_JOBS, InteractiveCommand
 from editor import Editor
 from error import UploadError
 from git_command import GitCommand
@@ -145,58 +147,66 @@ https://gerrit-review.googlesource.com/Documentation/user-upload.html#notify
 Gerrit Code Review:  https://www.gerritcodereview.com/
 
 """
+  PARALLEL_JOBS = DEFAULT_LOCAL_JOBS
 
   def _Options(self, p):
     p.add_option('-t',
                  dest='auto_topic', action='store_true',
-                 help='Send local branch name to Gerrit Code Review')
+                 help='send local branch name to Gerrit Code Review')
     p.add_option('--hashtag', '--ht',
                  dest='hashtags', action='append', default=[],
-                 help='Add hashtags (comma delimited) to the review.')
+                 help='add hashtags (comma delimited) to the review')
     p.add_option('--hashtag-branch', '--htb',
                  action='store_true',
-                 help='Add local branch name as a hashtag.')
+                 help='add local branch name as a hashtag')
     p.add_option('-l', '--label',
                  dest='labels', action='append', default=[],
-                 help='Add a label when uploading.')
+                 help='add a label when uploading')
     p.add_option('--re', '--reviewers',
                  type='string', action='append', dest='reviewers',
-                 help='Request reviews from these people.')
+                 help='request reviews from these people')
     p.add_option('--cc',
                  type='string', action='append', dest='cc',
-                 help='Also send email to these email addresses.')
-    p.add_option('--br',
+                 help='also send email to these email addresses')
+    p.add_option('--br', '--branch',
                  type='string', action='store', dest='branch',
-                 help='Branch to upload.')
-    p.add_option('--cbr', '--current-branch',
+                 help='(local) branch to upload')
+    p.add_option('-c', '--current-branch',
                  dest='current_branch', action='store_true',
-                 help='Upload current git branch.')
+                 help='upload current git branch')
+    p.add_option('--no-current-branch',
+                 dest='current_branch', action='store_false',
+                 help='upload all git branches')
+    # Turn this into a warning & remove this someday.
+    p.add_option('--cbr',
+                 dest='current_branch', action='store_true',
+                 help=optparse.SUPPRESS_HELP)
     p.add_option('--ne', '--no-emails',
                  action='store_false', dest='notify', default=True,
-                 help='If specified, do not send emails on upload.')
+                 help='do not send e-mails on upload')
     p.add_option('-p', '--private',
                  action='store_true', dest='private', default=False,
-                 help='If specified, upload as a private change.')
+                 help='upload as a private change (deprecated; use --wip)')
     p.add_option('-w', '--wip',
                  action='store_true', dest='wip', default=False,
-                 help='If specified, upload as a work-in-progress change.')
+                 help='upload as a work-in-progress change')
     p.add_option('-o', '--push-option',
                  type='string', action='append', dest='push_options',
                  default=[],
-                 help='Additional push options to transmit')
+                 help='additional push options to transmit')
     p.add_option('-D', '--destination', '--dest',
                  type='string', action='store', dest='dest_branch',
                  metavar='BRANCH',
-                 help='Submit for review on this target branch.')
+                 help='submit for review on this target branch')
     p.add_option('-n', '--dry-run',
                  dest='dryrun', default=False, action='store_true',
-                 help='Do everything except actually upload the CL.')
+                 help='do everything except actually upload the CL')
     p.add_option('-y', '--yes',
                  default=False, action='store_true',
-                 help='Answer yes to all safe prompts.')
+                 help='answer yes to all safe prompts')
     p.add_option('--no-cert-checks',
                  dest='validate_certs', action='store_false', default=True,
-                 help='Disable verifying ssl certs (unsafe).')
+                 help='disable verifying ssl certs (unsafe)')
     RepoHook.AddOptionGroup(p, 'pre-upload')
 
   def _SingleBranch(self, opt, branch, people):
@@ -502,40 +512,46 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
     merge_branch = p.stdout.strip()
     return merge_branch
 
+  @staticmethod
+  def _GatherOne(opt, project):
+    """Figure out the upload status for |project|."""
+    if opt.current_branch:
+      cbr = project.CurrentBranch
+      up_branch = project.GetUploadableBranch(cbr)
+      avail = [up_branch] if up_branch else None
+    else:
+      avail = project.GetUploadableBranches(opt.branch)
+    return (project, avail)
+
   def Execute(self, opt, args):
-    project_list = self.GetProjects(args)
-    pending = []
-    reviewers = []
-    cc = []
-    branch = None
+    projects = self.GetProjects(args)
 
-    if opt.branch:
-      branch = opt.branch
-
-    for project in project_list:
-      if opt.current_branch:
-        cbr = project.CurrentBranch
-        up_branch = project.GetUploadableBranch(cbr)
-        if up_branch:
-          avail = [up_branch]
-        else:
-          avail = None
-          print('repo: error: Unable to upload branch "%s". '
+    def _ProcessResults(_pool, _out, results):
+      pending = []
+      for result in results:
+        project, avail = result
+        if avail is None:
+          print('repo: error: %s: Unable to upload branch "%s". '
                 'You might be able to fix the branch by running:\n'
                 '  git branch --set-upstream-to m/%s' %
-                (str(cbr), self.manifest.branch),
+                (project.relpath, project.CurrentBranch, self.manifest.branch),
                 file=sys.stderr)
-      else:
-        avail = project.GetUploadableBranches(branch)
-      if avail:
-        pending.append((project, avail))
+        elif avail:
+          pending.append(result)
+      return pending
+
+    pending = self.ExecuteInParallel(
+        opt.jobs,
+        functools.partial(self._GatherOne, opt),
+        projects,
+        callback=_ProcessResults)
 
     if not pending:
-      if branch is None:
+      if opt.branch is None:
         print('repo: error: no branches ready for upload', file=sys.stderr)
       else:
         print('repo: error: no branches named "%s" ready for upload' %
-              (branch,), file=sys.stderr)
+              (opt.branch,), file=sys.stderr)
       return 1
 
     pending_proj_names = [project.name for (project, available) in pending]
@@ -548,10 +564,8 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         worktree_list=pending_worktrees):
       return 1
 
-    if opt.reviewers:
-      reviewers = _SplitEmails(opt.reviewers)
-    if opt.cc:
-      cc = _SplitEmails(opt.cc)
+    reviewers = _SplitEmails(opt.reviewers) if opt.reviewers else []
+    cc = _SplitEmails(opt.cc) if opt.cc else []
     people = (reviewers, cc)
 
     if len(pending) == 1 and len(pending[0][1]) == 1:

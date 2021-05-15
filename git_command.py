@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import os
-import re
 import sys
 import subprocess
-import tempfile
-from signal import SIGTERM
 
 from error import GitError
 from git_refs import HEAD
@@ -42,101 +40,15 @@ GIT_DIR = 'GIT_DIR'
 LAST_GITDIR = None
 LAST_CWD = None
 
-_ssh_proxy_path = None
-_ssh_sock_path = None
-_ssh_clients = []
-_ssh_version = None
-
-
-def _run_ssh_version():
-  """run ssh -V to display the version number"""
-  return subprocess.check_output(['ssh', '-V'], stderr=subprocess.STDOUT).decode()
-
-
-def _parse_ssh_version(ver_str=None):
-  """parse a ssh version string into a tuple"""
-  if ver_str is None:
-    ver_str = _run_ssh_version()
-  m = re.match(r'^OpenSSH_([0-9.]+)(p[0-9]+)?\s', ver_str)
-  if m:
-    return tuple(int(x) for x in m.group(1).split('.'))
-  else:
-    return ()
-
-
-def ssh_version():
-  """return ssh version as a tuple"""
-  global _ssh_version
-  if _ssh_version is None:
-    try:
-      _ssh_version = _parse_ssh_version()
-    except subprocess.CalledProcessError:
-      print('fatal: unable to detect ssh version', file=sys.stderr)
-      sys.exit(1)
-  return _ssh_version
-
-
-def ssh_sock(create=True):
-  global _ssh_sock_path
-  if _ssh_sock_path is None:
-    if not create:
-      return None
-    tmp_dir = '/tmp'
-    if not os.path.exists(tmp_dir):
-      tmp_dir = tempfile.gettempdir()
-    if ssh_version() < (6, 7):
-      tokens = '%r@%h:%p'
-    else:
-      tokens = '%C'  # hash of %l%h%p%r
-    _ssh_sock_path = os.path.join(
-        tempfile.mkdtemp('', 'ssh-', tmp_dir),
-        'master-' + tokens)
-  return _ssh_sock_path
-
-
-def _ssh_proxy():
-  global _ssh_proxy_path
-  if _ssh_proxy_path is None:
-    _ssh_proxy_path = os.path.join(
-        os.path.dirname(__file__),
-        'git_ssh')
-  return _ssh_proxy_path
-
-
-def _add_ssh_client(p):
-  _ssh_clients.append(p)
-
-
-def _remove_ssh_client(p):
-  try:
-    _ssh_clients.remove(p)
-  except ValueError:
-    pass
-
-
-def terminate_ssh_clients():
-  global _ssh_clients
-  for p in _ssh_clients:
-    try:
-      os.kill(p.pid, SIGTERM)
-      p.wait()
-    except OSError:
-      pass
-  _ssh_clients = []
-
-
-_git_version = None
-
 
 class _GitCall(object):
+  @functools.lru_cache(maxsize=None)
   def version_tuple(self):
-    global _git_version
-    if _git_version is None:
-      _git_version = Wrapper().ParseGitVersion()
-      if _git_version is None:
-        print('fatal: unable to detect git version', file=sys.stderr)
-        sys.exit(1)
-    return _git_version
+    ret = Wrapper().ParseGitVersion()
+    if ret is None:
+      print('fatal: unable to detect git version', file=sys.stderr)
+      sys.exit(1)
+    return ret
 
   def __getattr__(self, name):
     name = name.replace('_', '-')
@@ -254,7 +166,7 @@ class GitCommand(object):
                capture_stderr=False,
                merge_output=False,
                disable_editor=False,
-               ssh_proxy=False,
+               ssh_proxy=None,
                cwd=None,
                gitdir=None):
     env = self._GetBasicEnv()
@@ -262,8 +174,8 @@ class GitCommand(object):
     if disable_editor:
       env['GIT_EDITOR'] = ':'
     if ssh_proxy:
-      env['REPO_SSH_SOCK'] = ssh_sock()
-      env['GIT_SSH'] = _ssh_proxy()
+      env['REPO_SSH_SOCK'] = ssh_proxy.sock()
+      env['GIT_SSH'] = ssh_proxy.proxy
       env['GIT_SSH_VARIANT'] = 'ssh'
     if 'http_proxy' in env and 'darwin' == sys.platform:
       s = "'http.proxy=%s'" % (env['http_proxy'],)
@@ -346,7 +258,7 @@ class GitCommand(object):
       raise GitError('%s: %s' % (command[1], e))
 
     if ssh_proxy:
-      _add_ssh_client(p)
+      ssh_proxy.add_client(p)
 
     self.process = p
     if input:
@@ -358,7 +270,8 @@ class GitCommand(object):
     try:
       self.stdout, self.stderr = p.communicate()
     finally:
-      _remove_ssh_client(p)
+      if ssh_proxy:
+        ssh_proxy.remove_client(p)
     self.rc = p.wait()
 
   @staticmethod

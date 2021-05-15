@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import errno
 import functools
 import http.cookiejar as cookielib
 import io
@@ -56,6 +57,7 @@ from error import RepoChangedException, GitError, ManifestParseError
 import platform_utils
 from project import SyncBuffer
 from progress import Progress
+import ssh
 from wrapper import Wrapper
 from manifest_xml import GitcManifest
 
@@ -168,10 +170,11 @@ later is required to fix a server side protocol bug.
   PARALLEL_JOBS = 1
 
   def _CommonOptions(self, p):
-    try:
-      self.PARALLEL_JOBS = self.manifest.default.sync_j
-    except ManifestParseError:
-      pass
+    if self.manifest:
+      try:
+        self.PARALLEL_JOBS = self.manifest.default.sync_j
+      except ManifestParseError:
+        pass
     super()._CommonOptions(p)
 
   def _Options(self, p, show_smart=True):
@@ -212,6 +215,9 @@ later is required to fix a server side protocol bug.
     p.add_option('-c', '--current-branch',
                  dest='current_branch_only', action='store_true',
                  help='fetch only current branch from server')
+    p.add_option('--no-current-branch',
+                 dest='current_branch_only', action='store_false',
+                 help='fetch all branches from server')
     p.add_option('-m', '--manifest-name',
                  dest='manifest_name',
                  help='temporary manifest to use for this sync', metavar='NAME.xml')
@@ -230,8 +236,14 @@ later is required to fix a server side protocol bug.
                  help='fetch submodules from server')
     p.add_option('--use-superproject', action='store_true',
                  help='use the manifest superproject to sync projects')
+    p.add_option('--no-use-superproject', action='store_false',
+                 dest='use_superproject',
+                 help='disable use of manifest superprojects')
+    p.add_option('--tags',
+                 action='store_false',
+                 help='fetch tags')
     p.add_option('--no-tags',
-                 dest='tags', default=True, action='store_false',
+                 dest='tags', action='store_false',
                  help="don't fetch tags")
     p.add_option('--optimized-fetch',
                  dest='optimized_fetch', action='store_true',
@@ -268,15 +280,16 @@ later is required to fix a server side protocol bug.
 
   def _UseSuperproject(self, opt):
     """Returns True if use-superproject option is enabled"""
-    return (opt.use_superproject or
-            self.manifest.manifestProject.config.GetBoolean(
-                'repo.superproject'))
+    if opt.use_superproject is not None:
+      return opt.use_superproject
+    else:
+      return self.manifest.manifestProject.config.GetBoolean('repo.superproject')
 
   def _GetCurrentBranchOnly(self, opt):
     """Returns True if current-branch or use-superproject options are enabled."""
     return opt.current_branch_only or self._UseSuperproject(opt)
 
-  def _UpdateProjectsRevisionId(self, opt, args):
+  def _UpdateProjectsRevisionId(self, opt, args, load_local_manifests):
     """Update revisionId of every project with the SHA from superproject.
 
     This function updates each project's revisionId with SHA from superproject.
@@ -286,6 +299,7 @@ later is required to fix a server side protocol bug.
       opt: Program options returned from optparse.  See _Options().
       args: Arguments to pass to GetProjects. See the GetProjects
           docstring for details.
+      load_local_manifests: Whether to load local manifests.
 
     Returns:
       Returns path to the overriding manifest file.
@@ -298,10 +312,11 @@ later is required to fix a server side protocol bug.
                                     submodules_ok=opt.fetch_submodules)
     manifest_path = superproject.UpdateProjectsRevisionId(all_projects)
     if not manifest_path:
-      print('error: Update of revsionId from superproject has failed',
+      print('error: Update of revsionId from superproject has failed. '
+            'Please resync with --no-use-superproject option',
             file=sys.stderr)
       sys.exit(1)
-    self._ReloadManifest(manifest_path)
+    self._ReloadManifest(manifest_path, load_local_manifests)
     return manifest_path
 
   def _FetchProjectList(self, opt, projects):
@@ -343,6 +358,7 @@ later is required to fix a server side protocol bug.
           optimized_fetch=opt.optimized_fetch,
           retry_fetches=opt.retry_fetches,
           prune=opt.prune,
+          ssh_proxy=self.ssh_proxy,
           clone_filter=self.manifest.CloneFilter,
           partial_clone_exclude=self.manifest.PartialCloneExclude)
 
@@ -364,7 +380,11 @@ later is required to fix a server side protocol bug.
     finish = time.time()
     return (success, project, start, finish)
 
-  def _Fetch(self, projects, opt, err_event):
+  @classmethod
+  def _FetchInitChild(cls, ssh_proxy):
+    cls.ssh_proxy = ssh_proxy
+
+  def _Fetch(self, projects, opt, err_event, ssh_proxy):
     ret = True
 
     jobs = opt.jobs_network if opt.jobs_network else self.jobs
@@ -394,8 +414,14 @@ later is required to fix a server side protocol bug.
           break
       return ret
 
+    # We pass the ssh proxy settings via the class.  This allows multiprocessing
+    # to pickle it up when spawning children.  We can't pass it as an argument
+    # to _FetchProjectList below as multiprocessing is unable to pickle those.
+    Sync.ssh_proxy = None
+
     # NB: Multiprocessing is heavy, so don't spin it up for one job.
     if len(projects_list) == 1 or jobs == 1:
+      self._FetchInitChild(ssh_proxy)
       if not _ProcessResults(self._FetchProjectList(opt, x) for x in projects_list):
         ret = False
     else:
@@ -413,7 +439,8 @@ later is required to fix a server side protocol bug.
       else:
         pm.update(inc=0, msg='warming up')
         chunksize = 4
-      with multiprocessing.Pool(jobs) as pool:
+      with multiprocessing.Pool(
+          jobs, initializer=self._FetchInitChild, initargs=(ssh_proxy,)) as pool:
         results = pool.imap_unordered(
             functools.partial(self._FetchProjectList, opt),
             projects_list,
@@ -422,6 +449,11 @@ later is required to fix a server side protocol bug.
           ret = False
           pool.close()
 
+    # Cleanup the reference now that we're done with it, and we're going to
+    # release any resources it points to.  If we don't, later multiprocessing
+    # usage (e.g. checkouts) will try to pickle and then crash.
+    del Sync.ssh_proxy
+
     pm.end()
     self._fetch_times.Save()
 
@@ -429,6 +461,64 @@ later is required to fix a server side protocol bug.
       self._GCProjects(projects, opt, err_event)
 
     return (ret, fetched)
+
+  def _FetchMain(self, opt, args, all_projects, err_event, manifest_name,
+                 load_local_manifests, ssh_proxy):
+    """The main network fetch loop.
+
+    Args:
+      opt: Program options returned from optparse.  See _Options().
+      args: Command line args used to filter out projects.
+      all_projects: List of all projects that should be checked out.
+      err_event: Whether an error was hit while processing.
+      manifest_name: Manifest file to be reloaded.
+      load_local_manifests: Whether to load local manifests.
+      ssh_proxy: SSH manager for clients & masters.
+    """
+    rp = self.manifest.repoProject
+
+    to_fetch = []
+    now = time.time()
+    if _ONE_DAY_S <= (now - rp.LastFetch):
+      to_fetch.append(rp)
+    to_fetch.extend(all_projects)
+    to_fetch.sort(key=self._fetch_times.Get, reverse=True)
+
+    success, fetched = self._Fetch(to_fetch, opt, err_event, ssh_proxy)
+    if not success:
+      err_event.set()
+
+    _PostRepoFetch(rp, opt.repo_verify)
+    if opt.network_only:
+      # bail out now; the rest touches the working tree
+      if err_event.is_set():
+        print('\nerror: Exited sync due to fetch errors.\n', file=sys.stderr)
+        sys.exit(1)
+      return
+
+    # Iteratively fetch missing and/or nested unregistered submodules
+    previously_missing_set = set()
+    while True:
+      self._ReloadManifest(manifest_name, load_local_manifests)
+      all_projects = self.GetProjects(args,
+                                      missing_ok=True,
+                                      submodules_ok=opt.fetch_submodules)
+      missing = []
+      for project in all_projects:
+        if project.gitdir not in fetched:
+          missing.append(project)
+      if not missing:
+        break
+      # Stop us from non-stopped fetching actually-missing repos: If set of
+      # missing repos has not been changed from last fetch, we break.
+      missing_set = set(p.name for p in missing)
+      if previously_missing_set == missing_set:
+        break
+      previously_missing_set = missing_set
+      success, new_fetched = self._Fetch(missing, opt, err_event, ssh_proxy)
+      if not success:
+        err_event.set()
+      fetched.update(new_fetched)
 
   def _CheckoutOne(self, detach_head, force_sync, project):
     """Checkout work tree for one project
@@ -564,10 +654,18 @@ later is required to fix a server side protocol bug.
       t.join()
     pm.end()
 
-  def _ReloadManifest(self, manifest_name=None):
+  def _ReloadManifest(self, manifest_name=None, load_local_manifests=True):
+    """Reload the manfiest from the file specified by the |manifest_name|.
+
+    It unloads the manifest if |manifest_name| is None.
+
+    Args:
+      manifest_name: Manifest file to be reloaded.
+      load_local_manifests: Whether to load local manifests.
+    """
     if manifest_name:
       # Override calls _Unload already
-      self.manifest.Override(manifest_name)
+      self.manifest.Override(manifest_name, load_local_manifests=load_local_manifests)
     else:
       self.manifest._Unload()
 
@@ -613,6 +711,60 @@ later is required to fix a server side protocol bug.
       fd.write('\n'.join(new_project_paths))
       fd.write('\n')
     return 0
+
+  def UpdateCopyLinkfileList(self):
+    """Save all dests of copyfile and linkfile, and update them if needed.
+
+    Returns:
+      Whether update was successful.
+    """
+    new_paths = {}
+    new_linkfile_paths = []
+    new_copyfile_paths = []
+    for project in self.GetProjects(None, missing_ok=True):
+      new_linkfile_paths.extend(x.dest for x in project.linkfiles)
+      new_copyfile_paths.extend(x.dest for x in project.copyfiles)
+
+    new_paths = {
+        'linkfile': new_linkfile_paths,
+        'copyfile': new_copyfile_paths,
+    }
+
+    copylinkfile_name = 'copy-link-files.json'
+    copylinkfile_path = os.path.join(self.manifest.repodir, copylinkfile_name)
+    old_copylinkfile_paths = {}
+
+    if os.path.exists(copylinkfile_path):
+      with open(copylinkfile_path, 'rb') as fp:
+        try:
+          old_copylinkfile_paths = json.load(fp)
+        except:
+          print('error: %s is not a json formatted file.' %
+                copylinkfile_path, file=sys.stderr)
+          platform_utils.remove(copylinkfile_path)
+          return False
+
+      need_remove_files = []
+      need_remove_files.extend(
+          set(old_copylinkfile_paths.get('linkfile', [])) -
+          set(new_linkfile_paths))
+      need_remove_files.extend(
+          set(old_copylinkfile_paths.get('copyfile', [])) -
+          set(new_copyfile_paths))
+
+      for need_remove_file in need_remove_files:
+        try:
+          platform_utils.remove(need_remove_file)
+        except OSError as e:
+          if e.errno == errno.ENOENT:
+            # Try to remove the updated copyfile or linkfile.
+            # So, if the file is not exist, nothing need to do.
+            pass
+
+    # Create copy-link-files.json, save dest path of "copyfile" and "linkfile".
+    with open(copylinkfile_path, 'w', encoding='utf-8') as fp:
+      json.dump(new_paths, fp)
+    return True
 
   def _SmartSyncSetup(self, opt, smart_sync_manifest_path):
     if not self.manifest.manifest_server:
@@ -730,7 +882,7 @@ later is required to fix a server side protocol bug.
                              start, time.time(), clean)
       if not clean:
         sys.exit(1)
-      self._ReloadManifest(opt.manifest_name)
+      self._ReloadManifest(manifest_name)
       if opt.jobs is None:
         self.jobs = self.manifest.default.sync_j
 
@@ -779,7 +931,7 @@ later is required to fix a server side protocol bug.
           print('error: failed to remove existing smart sync override manifest: %s' %
                 e, file=sys.stderr)
 
-    err_event = _threading.Event()
+    err_event = multiprocessing.Event()
 
     rp = self.manifest.repoProject
     rp.PreSync()
@@ -802,8 +954,9 @@ later is required to fix a server side protocol bug.
     else:
       self._UpdateManifestProject(opt, mp, manifest_name)
 
+    load_local_manifests = not self.manifest.HasLocalManifests
     if self._UseSuperproject(opt):
-      manifest_name = self._UpdateProjectsRevisionId(opt, args)
+      manifest_name = self._UpdateProjectsRevisionId(opt, args, load_local_manifests)
 
     if self.gitc_manifest:
       gitc_manifest_projects = self.GetProjects(args,
@@ -849,48 +1002,15 @@ later is required to fix a server side protocol bug.
 
     self._fetch_times = _FetchTimes(self.manifest)
     if not opt.local_only:
-      to_fetch = []
-      now = time.time()
-      if _ONE_DAY_S <= (now - rp.LastFetch):
-        to_fetch.append(rp)
-      to_fetch.extend(all_projects)
-      to_fetch.sort(key=self._fetch_times.Get, reverse=True)
+      with multiprocessing.Manager() as manager:
+        with ssh.ProxyManager(manager) as ssh_proxy:
+          # Initialize the socket dir once in the parent.
+          ssh_proxy.sock()
+          self._FetchMain(opt, args, all_projects, err_event, manifest_name,
+                          load_local_manifests, ssh_proxy)
 
-      success, fetched = self._Fetch(to_fetch, opt, err_event)
-      if not success:
-        err_event.set()
-
-      _PostRepoFetch(rp, opt.repo_verify)
       if opt.network_only:
-        # bail out now; the rest touches the working tree
-        if err_event.is_set():
-          print('\nerror: Exited sync due to fetch errors.\n', file=sys.stderr)
-          sys.exit(1)
         return
-
-      # Iteratively fetch missing and/or nested unregistered submodules
-      previously_missing_set = set()
-      while True:
-        self._ReloadManifest(manifest_name)
-        all_projects = self.GetProjects(args,
-                                        missing_ok=True,
-                                        submodules_ok=opt.fetch_submodules)
-        missing = []
-        for project in all_projects:
-          if project.gitdir not in fetched:
-            missing.append(project)
-        if not missing:
-          break
-        # Stop us from non-stopped fetching actually-missing repos: If set of
-        # missing repos has not been changed from last fetch, we break.
-        missing_set = set(p.name for p in missing)
-        if previously_missing_set == missing_set:
-          break
-        previously_missing_set = missing_set
-        success, new_fetched = self._Fetch(to_fetch, opt, err_event)
-        if not success:
-          err_event.set()
-        fetched.update(new_fetched)
 
       # If we saw an error, exit with code 1 so that other scripts can check.
       if err_event.is_set():
@@ -914,6 +1034,13 @@ later is required to fix a server side protocol bug.
         print('\nerror: Local checkouts *not* updated.', file=sys.stderr)
         sys.exit(1)
 
+    err_update_linkfiles = not self.UpdateCopyLinkfileList()
+    if err_update_linkfiles:
+      err_event.set()
+      if opt.fail_fast:
+        print('\nerror: Local update copyfile or linkfile failed.', file=sys.stderr)
+        sys.exit(1)
+
     err_results = []
     # NB: We don't exit here because this is the last step.
     err_checkout = not self._Checkout(all_projects, opt, err_results)
@@ -932,6 +1059,8 @@ later is required to fix a server side protocol bug.
         print('error: Downloading network changes failed.', file=sys.stderr)
       if err_update_projects:
         print('error: Updating local project lists failed.', file=sys.stderr)
+      if err_update_linkfiles:
+        print('error: Updating copyfiles or linkfiles failed.', file=sys.stderr)
       if err_checkout:
         print('error: Checking out local projects failed.', file=sys.stderr)
         if err_results:

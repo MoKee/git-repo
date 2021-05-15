@@ -1041,15 +1041,16 @@ class Project(object):
                        verbose=False,
                        output_redir=None,
                        is_new=None,
-                       current_branch_only=False,
+                       current_branch_only=None,
                        force_sync=False,
                        clone_bundle=True,
-                       tags=True,
+                       tags=None,
                        archive=False,
                        optimized_fetch=False,
                        retry_fetches=0,
                        prune=False,
                        submodules=False,
+                       ssh_proxy=None,
                        clone_filter=None,
                        partial_clone_exclude=set()):
     """Perform only the network IO portion of the sync process.
@@ -1116,7 +1117,7 @@ class Project(object):
             and self._ApplyCloneBundle(initial=is_new, quiet=quiet, verbose=verbose)):
       is_new = False
 
-    if not current_branch_only:
+    if current_branch_only is None:
       if self.sync_c:
         current_branch_only = True
       elif not self.manifest._loaded:
@@ -1125,8 +1126,8 @@ class Project(object):
       elif self.manifest.default.sync_c:
         current_branch_only = True
 
-    if not self.sync_tags:
-      tags = False
+    if tags is None:
+      tags = self.sync_tags
 
     if self.clone_depth:
       depth = self.clone_depth
@@ -1143,6 +1144,7 @@ class Project(object):
               alt_dir=alt_dir, current_branch_only=current_branch_only,
               tags=tags, prune=prune, depth=depth,
               submodules=submodules, force_sync=force_sync,
+              ssh_proxy=ssh_proxy,
               clone_filter=clone_filter, retry_fetches=retry_fetches):
         return False
 
@@ -1214,6 +1216,9 @@ class Project(object):
                                          (self.revisionExpr, self.name))
 
   def SetRevisionId(self, revisionId):
+    if self.clone_depth or self.manifest.manifestProject.config.GetString('repo.depth'):
+      self.upstream = self.revisionExpr
+
     self.revisionId = revisionId
 
   def Sync_LocalHalf(self, syncbuf, force_sync=False, submodules=False):
@@ -1991,6 +1996,7 @@ class Project(object):
                    prune=False,
                    depth=None,
                    submodules=False,
+                   ssh_proxy=None,
                    force_sync=False,
                    clone_filter=None,
                    retry_fetches=2,
@@ -2038,16 +2044,14 @@ class Project(object):
     if not name:
       name = self.remote.name
 
-    ssh_proxy = False
     remote = self.GetRemote(name)
-    if remote.PreConnectFetch():
-      ssh_proxy = True
+    if not remote.PreConnectFetch(ssh_proxy):
+      ssh_proxy = None
 
     if initial:
       if alt_dir and 'objects' == os.path.basename(alt_dir):
         ref_dir = os.path.dirname(alt_dir)
         packed_refs = os.path.join(self.gitdir, 'packed-refs')
-        remote = self.GetRemote(name)
 
         all_refs = self.bare_ref.all
         ids = set(all_refs.values())
@@ -2134,6 +2138,8 @@ class Project(object):
       # Shallow checkout of a specific commit, fetch from that commit and not
       # the heads only as the commit might be deeper in the history.
       spec.append(branch)
+      if self.upstream:
+        spec.append(self.upstream)
     else:
       if is_sha1:
         branch = self.upstream
@@ -2205,7 +2211,7 @@ class Project(object):
 
       # Figure out how long to sleep before the next attempt, if there is one.
       if not verbose:
-        output_redir.write('\n%s:\n%s' % (self.name, gitcmd.stdout), file=sys.stderr)
+        output_redir.write('\n%s:\n%s' % (self.name, gitcmd.stdout))
       if try_n < retry_fetches - 1:
         output_redir.write('sleeping %s seconds before retrying' % retry_cur_sleep)
         time.sleep(retry_cur_sleep)
@@ -2233,7 +2239,7 @@ class Project(object):
             name=name, quiet=quiet, verbose=verbose, output_redir=output_redir,
             current_branch_only=current_branch_only and depth,
             initial=False, alt_dir=alt_dir,
-            depth=None, clone_filter=clone_filter)
+            depth=None, ssh_proxy=ssh_proxy, clone_filter=clone_filter)
 
     return ok
 
@@ -2438,14 +2444,6 @@ class Project(object):
         self.bare_objdir.init()
 
         if self.use_git_worktrees:
-          # Set up the m/ space to point to the worktree-specific ref space.
-          # We'll update the worktree-specific ref space on each checkout.
-          if self.manifest.branch:
-            self.bare_git.symbolic_ref(
-                '-m', 'redirecting to worktree scope',
-                R_M + self.manifest.branch,
-                R_WORKTREE_M + self.manifest.branch)
-
           # Enable per-worktree config file support if possible.  This is more a
           # nice-to-have feature for users rather than a hard requirement.
           if git_require((2, 20, 0)):
@@ -2604,6 +2602,14 @@ class Project(object):
   def _InitMRef(self):
     if self.manifest.branch:
       if self.use_git_worktrees:
+        # Set up the m/ space to point to the worktree-specific ref space.
+        # We'll update the worktree-specific ref space on each checkout.
+        ref = R_M + self.manifest.branch
+        if not self.bare_ref.symref(ref):
+          self.bare_git.symbolic_ref(
+              '-m', 'redirecting to worktree scope',
+              ref, R_WORKTREE_M + self.manifest.branch)
+
         # We can't update this ref with git worktrees until it exists.
         # We'll wait until the initial checkout to set it.
         if not os.path.exists(self.worktree):
