@@ -19,19 +19,47 @@ https://en.wikibooks.org/wiki/Git/Submodules_and_Superprojects
 
 Examples:
   superproject = Superproject()
-  project_commit_ids = superproject.UpdateProjectsRevisionId(projects)
+  UpdateProjectsResult = superproject.UpdateProjectsRevisionId(projects)
 """
 
 import hashlib
 import os
 import sys
+from typing import NamedTuple
 
-from git_command import GitCommand
+from git_command import git_require, GitCommand
 from git_refs import R_HEADS
-from wrapper import Wrapper
+from manifest_xml import LOCAL_MANIFEST_GROUP_PREFIX
 
 _SUPERPROJECT_GIT_NAME = 'superproject.git'
 _SUPERPROJECT_MANIFEST_NAME = 'superproject_override.xml'
+
+
+class SyncResult(NamedTuple):
+  """Return the status of sync and whether caller should exit."""
+
+  # Whether the superproject sync was successful.
+  success: bool
+  # Whether the caller should exit.
+  fatal: bool
+
+
+class CommitIdsResult(NamedTuple):
+  """Return the commit ids and whether caller should exit."""
+
+  # A dictionary with the projects/commit ids on success, otherwise None.
+  commit_ids: dict
+  # Whether the caller should exit.
+  fatal: bool
+
+
+class UpdateProjectsResult(NamedTuple):
+  """Return the overriding manifest file and whether caller should exit."""
+
+  # Path name of the overriding manfiest file if successful, otherwise None.
+  manifest_path: str
+  # Whether the caller should exit.
+  fatal: bool
 
 
 class Superproject(object):
@@ -41,19 +69,21 @@ class Superproject(object):
   lookup of commit ids for all projects. It contains _project_commit_ids which
   is a dictionary with project/commit id entries.
   """
-  def __init__(self, manifest, repodir, superproject_dir='exp-superproject',
-               quiet=False):
+  def __init__(self, manifest, repodir, git_event_log,
+               superproject_dir='exp-superproject', quiet=False):
     """Initializes superproject.
 
     Args:
       manifest: A Manifest object that is to be written to a file.
       repodir: Path to the .repo/ dir for holding all internal checkout state.
           It must be in the top directory of the repo client checkout.
+      git_event_log: A git trace2 event log to log events.
       superproject_dir: Relative path under |repodir| to checkout superproject.
       quiet:  If True then only print the progress messages.
     """
     self._project_commit_ids = None
     self._manifest = manifest
+    self._git_event_log = git_event_log
     self._quiet = quiet
     self._branch = self._GetBranch()
     self._repodir = os.path.abspath(repodir)
@@ -121,6 +151,9 @@ class Superproject(object):
       print('git fetch missing drectory: %s' % self._work_git,
             file=sys.stderr)
       return False
+    if not git_require((2, 28, 0)):
+      print('superproject requires a git version 2.28 or later', file=sys.stderr)
+      return False
     cmd = ['fetch', url, '--depth', '1', '--force', '--no-tags', '--filter', 'blob:none']
     if self._branch:
       cmd += [self._branch + ':' + self._branch]
@@ -169,44 +202,48 @@ class Superproject(object):
     """Gets a local copy of a superproject for the manifest.
 
     Returns:
-      True if sync of superproject is successful, or False.
+      SyncResult
     """
-    print('WARNING: --use-superproject is experimental and not '
-          'for general use', file=sys.stderr)
+    print('NOTICE: --use-superproject is in beta; report any issues to the '
+          'address described in `repo version`', file=sys.stderr)
 
     if not self._manifest.superproject:
-      print('error: superproject tag is not defined in manifest',
-            file=sys.stderr)
-      return False
+      msg = (f'repo error: superproject tag is not defined in manifest: '
+             f'{self._manifest.manifestFile}')
+      print(msg, file=sys.stderr)
+      self._git_event_log.ErrorEvent(msg, '')
+      return SyncResult(False, False)
 
+    should_exit = True
     url = self._manifest.superproject['remote'].url
     if not url:
       print('error: superproject URL is not defined in manifest',
             file=sys.stderr)
-      return False
+      return SyncResult(False, should_exit)
 
     if not self._Init():
-      return False
+      return SyncResult(False, should_exit)
     if not self._Fetch(url):
-      return False
+      return SyncResult(False, should_exit)
     if not self._quiet:
       print('%s: Initial setup for superproject completed.' % self._work_git)
-    return True
+    return SyncResult(True, False)
 
   def _GetAllProjectsCommitIds(self):
     """Get commit ids for all projects from superproject and save them in _project_commit_ids.
 
     Returns:
-      A dictionary with the projects/commit ids on success, otherwise None.
+      CommitIdsResult
     """
-    if not self.Sync():
-      return None
+    sync_result = self.Sync()
+    if not sync_result.success:
+      return CommitIdsResult(None, sync_result.fatal)
 
     data = self._LsTree()
     if not data:
       print('error: git ls-tree failed to return data for superproject',
             file=sys.stderr)
-      return None
+      return CommitIdsResult(None, True)
 
     # Parse lines like the following to select lines starting with '160000' and
     # build a dictionary with project path (last element) and its commit id (3rd element).
@@ -222,7 +259,7 @@ class Superproject(object):
         commit_ids[ls_data[3]] = ls_data[2]
 
     self._project_commit_ids = commit_ids
-    return commit_ids
+    return CommitIdsResult(commit_ids, False)
 
   def _WriteManfiestFile(self):
     """Writes manifest to a file.
@@ -247,6 +284,23 @@ class Superproject(object):
       return None
     return manifest_path
 
+  def _SkipUpdatingProjectRevisionId(self, project):
+    """Checks if a project's revision id needs to be updated or not.
+
+    Revision id for projects from local manifest will not be updated.
+
+    Args:
+      project: project whose revision id is being updated.
+
+    Returns:
+      True if a project's revision id should not be updated, or False,
+    """
+    path = project.relpath
+    if not path:
+      return True
+    # Skip the project if it comes from the local manifest.
+    return any(s.startswith(LOCAL_MANIFEST_GROUP_PREFIX) for s in project.groups)
+
   def UpdateProjectsRevisionId(self, projects):
     """Update revisionId of every project in projects with the commit id.
 
@@ -254,37 +308,35 @@ class Superproject(object):
       projects: List of projects whose revisionId needs to be updated.
 
     Returns:
-      manifest_path: Path name of the overriding manfiest file instead of None.
+      UpdateProjectsResult
     """
-    commit_ids = self._GetAllProjectsCommitIds()
+    commit_ids_result = self._GetAllProjectsCommitIds()
+    commit_ids = commit_ids_result.commit_ids
     if not commit_ids:
       print('error: Cannot get project commit ids from manifest', file=sys.stderr)
-      return None
+      return UpdateProjectsResult(None, commit_ids_result.fatal)
 
     projects_missing_commit_ids = []
-    superproject_fetchUrl = self._manifest.superproject['remote'].fetchUrl
     for project in projects:
+      if self._SkipUpdatingProjectRevisionId(project):
+        continue
       path = project.relpath
-      if not path:
-        continue
-      # Some manifests that pull projects from the "chromium" GoB
-      # (remote="chromium"), and have a private manifest that pulls projects
-      # from both the chromium GoB and "chrome-internal" GoB (remote="chrome").
-      # For such projects, one of the remotes will be different from
-      # superproject's remote. Until superproject, supports multiple remotes,
-      # don't update the commit ids of remotes that don't match superproject's
-      # remote.
-      if project.remote.fetchUrl != superproject_fetchUrl:
-        continue
       commit_id = commit_ids.get(path)
-      if commit_id:
-        project.SetRevisionId(commit_id)
-      else:
+      if not commit_id:
         projects_missing_commit_ids.append(path)
+
+    # If superproject doesn't have a commit id for a project, then report an
+    # error event and continue as if do not use superproject is specified.
     if projects_missing_commit_ids:
-      print('error: please file a bug using %s to report missing commit_ids for: %s' %
-            (Wrapper().BUG_URL, projects_missing_commit_ids), file=sys.stderr)
-      return None
+      msg = (f'error: please file a bug using {self._manifest.contactinfo.bugurl} '
+             f'to report missing commit_ids for: {projects_missing_commit_ids}')
+      print(msg, file=sys.stderr)
+      self._git_event_log.ErrorEvent(msg, '')
+      return UpdateProjectsResult(None, False)
+
+    for project in projects:
+      if not self._SkipUpdatingProjectRevisionId(project):
+        project.SetRevisionId(commit_ids.get(project.relpath))
 
     manifest_path = self._WriteManfiestFile()
-    return manifest_path
+    return UpdateProjectsResult(manifest_path, False)

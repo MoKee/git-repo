@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import itertools
 import os
 import platform
@@ -27,10 +28,17 @@ import platform_utils
 from project import RemoteSpec, Project, MetaProject
 from error import (ManifestParseError, ManifestInvalidPathError,
                    ManifestInvalidRevisionError)
+from wrapper import Wrapper
 
 MANIFEST_FILE_NAME = 'manifest.xml'
 LOCAL_MANIFEST_NAME = 'local_manifest.xml'
 LOCAL_MANIFESTS_DIR_NAME = 'local_manifests'
+
+# Add all projects from local manifest into a group.
+LOCAL_MANIFEST_GROUP_PREFIX = 'local:'
+
+# ContactInfo has the self-registered bug url, supplied by the manifest authors.
+ContactInfo = collections.namedtuple('ContactInfo', 'bugurl')
 
 # urljoin gets confused if the scheme is not known.
 urllib.parse.uses_relative.extend([
@@ -114,9 +122,13 @@ class _Default(object):
   sync_tags = True
 
   def __eq__(self, other):
+    if not isinstance(other, _Default):
+      return False
     return self.__dict__ == other.__dict__
 
   def __ne__(self, other):
+    if not isinstance(other, _Default):
+      return True
     return self.__dict__ != other.__dict__
 
 
@@ -139,12 +151,18 @@ class _XmlRemote(object):
     self.resolvedFetchUrl = self._resolveFetchUrl()
 
   def __eq__(self, other):
+    if not isinstance(other, _XmlRemote):
+      return False
     return self.__dict__ == other.__dict__
 
   def __ne__(self, other):
+    if not isinstance(other, _XmlRemote):
+      return True
     return self.__dict__ != other.__dict__
 
   def _resolveFetchUrl(self):
+    if self.fetchUrl is None:
+      return ''
     url = self.fetchUrl.rstrip('/')
     manifestUrl = self.manifestUrl.rstrip('/')
     # urljoin will gets confused over quite a few things.  The ones we care
@@ -479,10 +497,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         e.setAttribute('remote', remoteName)
       root.appendChild(e)
 
-    if self._contactinfo:
+    if self._contactinfo.bugurl != Wrapper().BUG_URL:
       root.appendChild(doc.createTextNode(''))
       e = doc.createElement('contactinfo')
-      e.setAttribute('bugurl', self._contactinfo['bugurl'])
+      e.setAttribute('bugurl', self._contactinfo.bugurl)
       root.appendChild(e)
 
     return doc
@@ -646,7 +664,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     self._default = None
     self._repo_hooks_project = None
     self._superproject = {}
-    self._contactinfo = {}
+    self._contactinfo = ContactInfo(Wrapper().BUG_URL)
     self._notice = None
     self.branch = None
     self._manifest_server = None
@@ -674,7 +692,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
               # Since local manifests are entirely managed by the user, allow
               # them to point anywhere the user wants.
               nodes.append(self._ParseManifestXml(
-                  local, self.repodir, restrict_includes=False))
+                  local, self.repodir,
+                  parent_groups=f'{LOCAL_MANIFEST_GROUP_PREFIX}:{local_file[:-4]}',
+                  restrict_includes=False))
         except OSError:
           pass
 
@@ -771,9 +791,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     for node in itertools.chain(*node_list):
       if node.nodeName == 'default':
         new_default = self._ParseDefault(node)
+        emptyDefault = not node.hasAttributes() and not node.hasChildNodes()
         if self._default is None:
           self._default = new_default
-        elif new_default != self._default:
+        elif not emptyDefault and new_default != self._default:
           raise ManifestParseError('duplicate default in %s' %
                                    (self.manifestFile))
 
@@ -892,7 +913,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
       if node.nodeName == 'contactinfo':
         bugurl = self._reqatt(node, 'bugurl')
         # This element can be repeated, later entries will clobber earlier ones.
-        self._contactinfo['bugurl'] = bugurl
+        self._contactinfo = ContactInfo(bugurl)
+
       if node.nodeName == 'remove-project':
         name = self._reqatt(node, 'name')
 

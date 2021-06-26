@@ -71,7 +71,7 @@ from subcmds import all_commands
 #
 # python-3.6 is in Ubuntu Bionic.
 MIN_PYTHON_VERSION_SOFT = (3, 6)
-MIN_PYTHON_VERSION_HARD = (3, 5)
+MIN_PYTHON_VERSION_HARD = (3, 6)
 
 if sys.version_info.major < 3:
   print('repo: error: Python 2 is no longer supported; '
@@ -195,22 +195,25 @@ class _Repo(object):
 
     SetDefaultColoring(gopts.color)
 
+    git_trace2_event_log = EventLog()
+    repo_client = RepoClient(self.repodir)
+    gitc_manifest = None
+    gitc_client_name = gitc_utils.parse_clientdir(os.getcwd())
+    if gitc_client_name:
+      gitc_manifest = GitcClient(self.repodir, gitc_client_name)
+      repo_client.isGitcClient = True
+
     try:
-      cmd = self.commands[name]()
+      cmd = self.commands[name](
+          repodir=self.repodir,
+          client=repo_client,
+          manifest=repo_client.manifest,
+          gitc_manifest=gitc_manifest,
+          git_event_log=git_trace2_event_log)
     except KeyError:
       print("repo: '%s' is not a repo command.  See 'repo help'." % name,
             file=sys.stderr)
       return 1
-
-    git_trace2_event_log = EventLog()
-    cmd.repodir = self.repodir
-    cmd.client = RepoClient(cmd.repodir)
-    cmd.manifest = cmd.client.manifest
-    cmd.gitc_manifest = None
-    gitc_client_name = gitc_utils.parse_clientdir(os.getcwd())
-    if gitc_client_name:
-      cmd.gitc_manifest = GitcClient(cmd.repodir, gitc_client_name)
-      cmd.client.isGitcClient = True
 
     Editor.globalConfig = cmd.client.globalConfig
 

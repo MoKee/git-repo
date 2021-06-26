@@ -15,7 +15,6 @@
 import multiprocessing
 import os
 import optparse
-import platform
 import re
 import sys
 
@@ -43,14 +42,31 @@ class Command(object):
   """Base class for any command line action in repo.
   """
 
-  common = False
+  # Singleton for all commands to track overall repo command execution and
+  # provide event summary to callers.  Only used by sync subcommand currently.
+  #
+  # NB: This is being replaced by git trace2 events.  See git_trace2_event_log.
   event_log = EventLog()
-  manifest = None
-  _optparse = None
+
+  # Whether this command is a "common" one, i.e. whether the user would commonly
+  # use it or it's a more uncommon command.  This is used by the help command to
+  # show short-vs-full summaries.
+  COMMON = False
 
   # Whether this command supports running in parallel.  If greater than 0,
   # it is the number of parallel jobs to default to.
   PARALLEL_JOBS = None
+
+  def __init__(self, repodir=None, client=None, manifest=None, gitc_manifest=None,
+               git_event_log=None):
+    self.repodir = repodir
+    self.client = client
+    self.manifest = manifest
+    self.gitc_manifest = gitc_manifest
+    self.git_event_log = git_event_log
+
+    # Cache for the OptionParser property.
+    self._optparse = None
 
   def WantPager(self, _opt):
     return False
