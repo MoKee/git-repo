@@ -278,16 +278,9 @@ later is required to fix a server side protocol bug.
       branch = branch[len(R_HEADS):]
     return branch
 
-  def _UseSuperproject(self, opt):
-    """Returns True if use-superproject option is enabled"""
-    if opt.use_superproject is not None:
-      return opt.use_superproject
-    else:
-      return self.manifest.manifestProject.config.GetBoolean('repo.superproject')
-
   def _GetCurrentBranchOnly(self, opt):
     """Returns True if current-branch or use-superproject options are enabled."""
-    return opt.current_branch_only or self._UseSuperproject(opt)
+    return opt.current_branch_only or git_superproject.UseSuperproject(opt, self.manifest)
 
   def _UpdateProjectsRevisionId(self, opt, args, load_local_manifests):
     """Update revisionId of every project with the SHA from superproject.
@@ -316,10 +309,11 @@ later is required to fix a server side protocol bug.
     if manifest_path:
       self._ReloadManifest(manifest_path, load_local_manifests)
     else:
-      print('error: Update of revsionId from superproject has failed. '
-            'Please resync with --no-use-superproject option',
+      print('warning: Update of revisionId from superproject has failed, '
+            'repo sync will not use superproject to fetch the source. ',
+            'Please resync with the --no-use-superproject option to avoid this repo warning.',
             file=sys.stderr)
-      if update_result.fatal:
+      if update_result.fatal and opt.use_superproject is not None:
         sys.exit(1)
     return manifest_path
 
@@ -367,7 +361,7 @@ later is required to fix a server side protocol bug.
           partial_clone_exclude=self.manifest.PartialCloneExclude)
 
       output = buf.getvalue()
-      if opt.verbose and output:
+      if (opt.verbose or not success) and output:
         print('\n' + output.rstrip())
 
       if not success:
@@ -964,10 +958,8 @@ later is required to fix a server side protocol bug.
       self._UpdateManifestProject(opt, mp, manifest_name)
 
     load_local_manifests = not self.manifest.HasLocalManifests
-    if self._UseSuperproject(opt):
-      new_manifest_name = self._UpdateProjectsRevisionId(opt, args, load_local_manifests)
-      if not new_manifest_name:
-        manifest_name = new_manifest_name
+    if git_superproject.UseSuperproject(opt, self.manifest):
+      manifest_name = self._UpdateProjectsRevisionId(opt, args, load_local_manifests) or opt.manifest_name
 
     if self.gitc_manifest:
       gitc_manifest_projects = self.GetProjects(args,

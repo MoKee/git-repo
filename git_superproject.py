@@ -23,11 +23,14 @@ Examples:
 """
 
 import hashlib
+import functools
 import os
 import sys
+import time
 from typing import NamedTuple
 
 from git_command import git_require, GitCommand
+from git_config import RepoConfig
 from git_refs import R_HEADS
 from manifest_xml import LOCAL_MANIFEST_GROUP_PREFIX
 
@@ -114,6 +117,11 @@ class Superproject(object):
       branch = branch[len(R_HEADS):]
     return branch
 
+  def _LogError(self, message):
+    """Logs message to stderr and _git_event_log."""
+    print(message, file=sys.stderr)
+    self._git_event_log.ErrorEvent(message, '')
+
   def _Init(self):
     """Sets up a local Git repository to get a copy of a superproject.
 
@@ -133,8 +141,8 @@ class Superproject(object):
                    capture_stderr=True)
     retval = p.Wait()
     if retval:
-      print('repo: error: git init call failed with return code: %r, stderr: %r' %
-            (retval, p.stderr), file=sys.stderr)
+      self._LogError(f'repo: error: git init call failed, command: git {cmd}, '
+                     f'return code: {retval}, stderr: {p.stderr}')
       return False
     return True
 
@@ -148,8 +156,7 @@ class Superproject(object):
       True if fetch is successful, or False.
     """
     if not os.path.exists(self._work_git):
-      print('git fetch missing drectory: %s' % self._work_git,
-            file=sys.stderr)
+      self._LogError(f'git fetch missing directory: {self._work_git}')
       return False
     if not git_require((2, 28, 0)):
       print('superproject requires a git version 2.28 or later', file=sys.stderr)
@@ -164,8 +171,8 @@ class Superproject(object):
                    capture_stderr=True)
     retval = p.Wait()
     if retval:
-      print('repo: error: git fetch call failed with return code: %r, stderr: %r' %
-            (retval, p.stderr), file=sys.stderr)
+      self._LogError(f'repo: error: git fetch call failed, command: git {cmd}, '
+                     f'return code: {retval}, stderr: {p.stderr}')
       return False
     return True
 
@@ -178,8 +185,7 @@ class Superproject(object):
       data: data returned from 'git ls-tree ...' instead of None.
     """
     if not os.path.exists(self._work_git):
-      print('git ls-tree missing drectory: %s' % self._work_git,
-            file=sys.stderr)
+      self._LogError(f'git ls-tree missing directory: {self._work_git}')
       return None
     data = None
     branch = 'HEAD' if not self._branch else self._branch
@@ -194,8 +200,8 @@ class Superproject(object):
     if retval == 0:
       data = p.stdout
     else:
-      print('repo: error: git ls-tree call failed with return code: %r, stderr: %r' % (
-          retval, p.stderr), file=sys.stderr)
+      self._LogError(f'repo: error: git ls-tree call failed, command: git {cmd}, '
+                     f'return code: {retval}, stderr: {p.stderr}')
     return data
 
   def Sync(self):
@@ -208,17 +214,15 @@ class Superproject(object):
           'address described in `repo version`', file=sys.stderr)
 
     if not self._manifest.superproject:
-      msg = (f'repo error: superproject tag is not defined in manifest: '
-             f'{self._manifest.manifestFile}')
-      print(msg, file=sys.stderr)
-      self._git_event_log.ErrorEvent(msg, '')
+      self._LogError(f'repo error: superproject tag is not defined in manifest: '
+                     f'{self._manifest.manifestFile}')
       return SyncResult(False, False)
 
     should_exit = True
     url = self._manifest.superproject['remote'].url
     if not url:
-      print('error: superproject URL is not defined in manifest',
-            file=sys.stderr)
+      self._LogError(f'repo error: superproject URL is not defined in manifest: '
+                     f'{self._manifest.manifestFile}')
       return SyncResult(False, should_exit)
 
     if not self._Init():
@@ -241,7 +245,7 @@ class Superproject(object):
 
     data = self._LsTree()
     if not data:
-      print('error: git ls-tree failed to return data for superproject',
+      print('warning: git ls-tree failed to return data for superproject',
             file=sys.stderr)
       return CommitIdsResult(None, True)
 
@@ -268,9 +272,7 @@ class Superproject(object):
       manifest_path: Path name of the file into which manifest is written instead of None.
     """
     if not os.path.exists(self._superproject_path):
-      print('error: missing superproject directory %s' %
-            self._superproject_path,
-            file=sys.stderr)
+      self._LogError(f'error: missing superproject directory: {self._superproject_path}')
       return None
     manifest_str = self._manifest.ToXml(groups=self._manifest.GetGroupsStr()).toxml()
     manifest_path = self._manifest_path
@@ -278,9 +280,7 @@ class Superproject(object):
       with open(manifest_path, 'w', encoding='utf-8') as fp:
         fp.write(manifest_str)
     except IOError as e:
-      print('error: cannot write manifest to %s:\n%s'
-            % (manifest_path, e),
-            file=sys.stderr)
+      self._LogError(f'error: cannot write manifest to : {manifest_path} {e}')
       return None
     return manifest_path
 
@@ -298,6 +298,9 @@ class Superproject(object):
     path = project.relpath
     if not path:
       return True
+    # Skip the project with revisionId.
+    if project.revisionId:
+      return True
     # Skip the project if it comes from the local manifest.
     return any(s.startswith(LOCAL_MANIFEST_GROUP_PREFIX) for s in project.groups)
 
@@ -313,7 +316,7 @@ class Superproject(object):
     commit_ids_result = self._GetAllProjectsCommitIds()
     commit_ids = commit_ids_result.commit_ids
     if not commit_ids:
-      print('error: Cannot get project commit ids from manifest', file=sys.stderr)
+      print('warning: Cannot get project commit ids from manifest', file=sys.stderr)
       return UpdateProjectsResult(None, commit_ids_result.fatal)
 
     projects_missing_commit_ids = []
@@ -328,10 +331,8 @@ class Superproject(object):
     # If superproject doesn't have a commit id for a project, then report an
     # error event and continue as if do not use superproject is specified.
     if projects_missing_commit_ids:
-      msg = (f'error: please file a bug using {self._manifest.contactinfo.bugurl} '
-             f'to report missing commit_ids for: {projects_missing_commit_ids}')
-      print(msg, file=sys.stderr)
-      self._git_event_log.ErrorEvent(msg, '')
+      self._LogError(f'error: please file a bug using {self._manifest.contactinfo.bugurl} '
+                     f'to report missing commit_ids for: {projects_missing_commit_ids}')
       return UpdateProjectsResult(None, False)
 
     for project in projects:
@@ -340,3 +341,81 @@ class Superproject(object):
 
     manifest_path = self._WriteManfiestFile()
     return UpdateProjectsResult(manifest_path, False)
+
+
+@functools.lru_cache(maxsize=None)
+def _UseSuperprojectFromConfiguration():
+  """Returns the user choice of whether to use superproject."""
+  user_cfg = RepoConfig.ForUser()
+  system_cfg = RepoConfig.ForSystem()
+  time_now = int(time.time())
+
+  user_value = user_cfg.GetBoolean('repo.superprojectChoice')
+  if user_value is not None:
+    user_expiration = user_cfg.GetInt('repo.superprojectChoiceExpire')
+    if user_expiration is not None and (user_expiration <= 0 or user_expiration >= time_now):
+      # TODO(b/190688390) - Remove prompt when we are comfortable with the new
+      # default value.
+      print(('You are currently enrolled in Git submodules experiment '
+             '(go/android-submodules-quickstart).  Use --no-use-superproject '
+             'to override.\n'), file=sys.stderr)
+    return user_value
+
+  # We don't have an unexpired choice, ask for one.
+  system_value = system_cfg.GetBoolean('repo.superprojectChoice')
+  if system_value:
+    # The system configuration is proposing that we should enable the
+    # use of superproject. Present this to user for confirmation if we
+    # are on a TTY, or, when we are not on a TTY, accept the system
+    # default for this time only.
+    #
+    # TODO(b/190688390) - Remove prompt when we are comfortable with the new
+    # default value.
+    prompt = ('Repo can now use Git submodules (go/android-submodules-quickstart) '
+              'instead of manifests to represent the state of the Android '
+              'superproject, which results in faster syncs and better atomicity.\n\n')
+    if sys.stdout.isatty():
+      prompt += 'Would you like to opt in for two weeks (y/N)? '
+      response = input(prompt).lower()
+      time_choiceexpire = time_now + (86400 * 14)
+      if response in ('y', 'yes'):
+        userchoice = True
+      elif response in ('a', 'always'):
+        userchoice = True
+        time_choiceexpire = 0
+      elif response == 'never':
+        userchoice = False
+        time_choiceexpire = 0
+      elif response in ('n', 'no'):
+        userchoice = False
+      else:
+        # Unrecognized user response, assume the intention was no, but
+        # only for 2 hours instead of 2 weeks to balance between not
+        # being overly pushy while still retain the opportunity to
+        # enroll.
+        userchoice = False
+        time_choiceexpire = time_now + 7200
+
+      user_cfg.SetString('repo.superprojectChoiceExpire', str(time_choiceexpire))
+      user_cfg.SetBoolean('repo.superprojectChoice', userchoice)
+
+      return userchoice
+    else:
+      print('Accepting once since we are not on a TTY', file=sys.stderr)
+      return True
+
+  # For all other cases, we would not use superproject by default.
+  return False
+
+
+def UseSuperproject(opt, manifest):
+  """Returns a boolean if use-superproject option is enabled."""
+
+  if opt.use_superproject is not None:
+    return opt.use_superproject
+  else:
+    client_value = manifest.manifestProject.config.GetBoolean('repo.superproject')
+    if client_value is not None:
+      return client_value
+    else:
+      return _UseSuperprojectFromConfiguration()
