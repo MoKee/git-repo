@@ -519,21 +519,8 @@ class Project(object):
     self.client = self.manifest = manifest
     self.name = name
     self.remote = remote
-    self.gitdir = gitdir.replace('\\', '/')
-    self.objdir = objdir.replace('\\', '/')
-    if worktree:
-      self.worktree = os.path.normpath(worktree).replace('\\', '/')
-    else:
-      self.worktree = None
-    self.relpath = relpath
-    self.revisionExpr = revisionExpr
-
-    if revisionId is None \
-            and revisionExpr \
-            and IsId(revisionExpr):
-      self.revisionId = revisionExpr
-    else:
-      self.revisionId = revisionId
+    self.UpdatePaths(relpath, worktree, gitdir, objdir)
+    self.SetRevision(revisionExpr, revisionId=revisionId)
 
     self.rebase = rebase
     self.groups = groups
@@ -556,22 +543,41 @@ class Project(object):
     self.copyfiles = []
     self.linkfiles = []
     self.annotations = []
-    self.config = GitConfig.ForRepository(gitdir=self.gitdir,
-                                          defaults=self.client.globalConfig)
-
-    if self.worktree:
-      self.work_git = self._GitGetByExec(self, bare=False, gitdir=gitdir)
-    else:
-      self.work_git = None
-    self.bare_git = self._GitGetByExec(self, bare=True, gitdir=gitdir)
-    self.bare_ref = GitRefs(gitdir)
-    self.bare_objdir = self._GitGetByExec(self, bare=True, gitdir=objdir)
     self.dest_branch = dest_branch
     self.old_revision = old_revision
 
     # This will be filled in if a project is later identified to be the
     # project containing repo hooks.
     self.enabled_repo_hooks = []
+
+  def SetRevision(self, revisionExpr, revisionId=None):
+    """Set revisionId based on revision expression and id"""
+    self.revisionExpr = revisionExpr
+    if revisionId is None and revisionExpr and IsId(revisionExpr):
+      self.revisionId = self.revisionExpr
+    else:
+      self.revisionId = revisionId
+
+  def UpdatePaths(self, relpath, worktree, gitdir, objdir):
+    """Update paths used by this project"""
+    self.gitdir = gitdir.replace('\\', '/')
+    self.objdir = objdir.replace('\\', '/')
+    if worktree:
+      self.worktree = os.path.normpath(worktree).replace('\\', '/')
+    else:
+      self.worktree = None
+    self.relpath = relpath
+
+    self.config = GitConfig.ForRepository(gitdir=self.gitdir,
+                                          defaults=self.manifest.globalConfig)
+
+    if self.worktree:
+      self.work_git = self._GitGetByExec(self, bare=False, gitdir=self.gitdir)
+    else:
+      self.work_git = None
+    self.bare_git = self._GitGetByExec(self, bare=True, gitdir=self.gitdir)
+    self.bare_ref = GitRefs(self.gitdir)
+    self.bare_objdir = self._GitGetByExec(self, bare=True, gitdir=self.objdir)
 
   @property
   def Derived(self):
@@ -1182,10 +1188,8 @@ class Project(object):
       self._InitMRef()
     else:
       self._InitMirrorHead()
-      try:
-        platform_utils.remove(os.path.join(self.gitdir, 'FETCH_HEAD'))
-      except OSError:
-        pass
+      platform_utils.remove(os.path.join(self.gitdir, 'FETCH_HEAD'),
+                            missing_ok=True)
     return True
 
   def PostRepoUpgrade(self):
@@ -2307,15 +2311,12 @@ class Project(object):
     cmd.append('+refs/tags/*:refs/tags/*')
 
     ok = GitCommand(self, cmd, bare=True).Wait() == 0
-    if os.path.exists(bundle_dst):
-      platform_utils.remove(bundle_dst)
-    if os.path.exists(bundle_tmp):
-      platform_utils.remove(bundle_tmp)
+    platform_utils.remove(bundle_dst, missing_ok=True)
+    platform_utils.remove(bundle_tmp, missing_ok=True)
     return ok
 
   def _FetchBundle(self, srcUrl, tmpPath, dstPath, quiet, verbose):
-    if os.path.exists(dstPath):
-      platform_utils.remove(dstPath)
+    platform_utils.remove(dstPath, missing_ok=True)
 
     cmd = ['curl', '--fail', '--output', tmpPath, '--netrc', '--location']
     if quiet:
@@ -2761,10 +2762,7 @@ class Project(object):
         # If the source file doesn't exist, ensure the destination
         # file doesn't either.
         if name in symlink_files and not os.path.lexists(src):
-          try:
-            platform_utils.remove(dst)
-          except OSError:
-            pass
+          platform_utils.remove(dst, missing_ok=True)
 
       except OSError as e:
         if e.errno == errno.EPERM:

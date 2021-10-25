@@ -90,6 +90,7 @@ following DTD:
   <!ELEMENT extend-project EMPTY>
   <!ATTLIST extend-project name CDATA #REQUIRED>
   <!ATTLIST extend-project path CDATA #IMPLIED>
+  <!ATTLIST extend-project dest-path CDATA #IMPLIED>
   <!ATTLIST extend-project groups CDATA #IMPLIED>
   <!ATTLIST extend-project revision CDATA #IMPLIED>
   <!ATTLIST extend-project remote CDATA #IMPLIED>
@@ -103,8 +104,9 @@ following DTD:
   <!ATTLIST repo-hooks enabled-list CDATA #REQUIRED>
 
   <!ELEMENT superproject EMPTY>
-  <!ATTLIST superproject name    CDATA #REQUIRED>
-  <!ATTLIST superproject remote  IDREF #IMPLIED>
+  <!ATTLIST superproject name     CDATA #REQUIRED>
+  <!ATTLIST superproject remote   IDREF #IMPLIED>
+  <!ATTLIST superproject revision CDATA #IMPLIED>
 
   <!ELEMENT contactinfo EMPTY>
   <!ATTLIST contactinfo bugurl  CDATA #REQUIRED>
@@ -336,6 +338,11 @@ against changes to the original manifest.
 Attribute `path`: If specified, limit the change to projects checked out
 at the specified path, rather than all projects with the given name.
 
+Attribute `dest-path`: If specified, a path relative to the top directory
+of the repo client where the Git working directory for this project
+should be placed.  This is used to move a project in the checkout by
+overriding the existing `path` setting.
+
 Attribute `groups`: List of additional groups to which this project
 belongs.  Same syntax as the corresponding element of `project`.
 
@@ -431,6 +438,11 @@ same meaning as project's name attribute. See the
 
 Attribute `remote`: Name of a previously defined remote element.
 If not supplied the remote given by the default element is used.
+
+Attribute `revision`: Name of the Git branch the manifest wants
+to track for this superproject. If not supplied the revision given
+by the remote element is used if applicable, else the default
+element is used.
 
 ### Element contactinfo
 

@@ -270,8 +270,7 @@ class XmlManifest(object):
     self.Override(name)
 
     # Old versions of repo would generate symlinks we need to clean up.
-    if os.path.lexists(self.manifestFile):
-      platform_utils.remove(self.manifestFile)
+    platform_utils.remove(self.manifestFile, missing_ok=True)
     # This file is interpreted as if it existed inside the manifest repo.
     # That allows us to use <include> with the relative file name.
     with open(self.manifestFile, 'w') as fp:
@@ -507,6 +506,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
       if not d.remote or remote.orig_name != remoteName:
         remoteName = remote.orig_name
         e.setAttribute('remote', remoteName)
+      revision = remote.revision or d.revisionExpr
+      if not revision or revision != self._superproject['revision']:
+        e.setAttribute('revision', self._superproject['revision'])
       root.appendChild(e)
 
     if self._contactinfo.bugurl != Wrapper().BUG_URL:
@@ -852,6 +854,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
       for subproject in project.subprojects:
         recursively_add_projects(subproject)
 
+    repo_hooks_project = None
+    enabled_repo_hooks = None
     for node in itertools.chain(*node_list):
       if node.nodeName == 'project':
         project = self._ParseProject(node)
@@ -864,6 +868,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                                    'project: %s' % name)
 
         path = node.getAttribute('path')
+        dest_path = node.getAttribute('dest-path')
         groups = node.getAttribute('groups')
         if groups:
           groups = self._ParseList(groups)
@@ -872,46 +877,37 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         if remote:
           remote = self._get_remote(node)
 
+        named_projects = self._projects[name]
+        if dest_path and not path and len(named_projects) > 1:
+          raise ManifestParseError('extend-project cannot use dest-path when '
+                                   'matching multiple projects: %s' % name)
         for p in self._projects[name]:
           if path and p.relpath != path:
             continue
           if groups:
             p.groups.extend(groups)
           if revision:
-            p.revisionExpr = revision
-            if IsId(revision):
-              p.revisionId = revision
-            else:
-              p.revisionId = None
+            p.SetRevision(revision)
+
           if remote:
             p.remote = remote.ToRemoteSpec(name)
-      if node.nodeName == 'repo-hooks':
-        # Get the name of the project and the (space-separated) list of enabled.
-        repo_hooks_project = self._reqatt(node, 'in-project')
-        enabled_repo_hooks = self._ParseList(self._reqatt(node, 'enabled-list'))
 
+          if dest_path:
+            del self._paths[p.relpath]
+            relpath, worktree, gitdir, objdir, _ = self.GetProjectPaths(name, dest_path)
+            p.UpdatePaths(relpath, worktree, gitdir, objdir)
+            self._paths[p.relpath] = p
+
+      if node.nodeName == 'repo-hooks':
         # Only one project can be the hooks project
-        if self._repo_hooks_project is not None:
+        if repo_hooks_project is not None:
           raise ManifestParseError(
               'duplicate repo-hooks in %s' %
               (self.manifestFile))
 
-        # Store a reference to the Project.
-        try:
-          repo_hooks_projects = self._projects[repo_hooks_project]
-        except KeyError:
-          raise ManifestParseError(
-              'project %s not found for repo-hooks' %
-              (repo_hooks_project))
-
-        if len(repo_hooks_projects) != 1:
-          raise ManifestParseError(
-              'internal error parsing repo-hooks in %s' %
-              (self.manifestFile))
-        self._repo_hooks_project = repo_hooks_projects[0]
-
-        # Store the enabled hooks in the Project object.
-        self._repo_hooks_project.enabled_repo_hooks = enabled_repo_hooks
+        # Get the name of the project and the (space-separated) list of enabled.
+        repo_hooks_project = self._reqatt(node, 'in-project')
+        enabled_repo_hooks = self._ParseList(self._reqatt(node, 'enabled-list'))
       if node.nodeName == 'superproject':
         name = self._reqatt(node, 'name')
         # There can only be one superproject.
@@ -929,6 +925,13 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
           raise ManifestParseError("no remote for superproject %s within %s" %
                                    (name, self.manifestFile))
         self._superproject['remote'] = remote.ToRemoteSpec(name)
+        revision = node.getAttribute('revision') or remote.revision
+        if not revision:
+          revision = self._default.revisionExpr
+        if not revision:
+          raise ManifestParseError('no revision for superproject %s within %s' %
+                                   (name, self.manifestFile))
+        self._superproject['revision'] = revision
       if node.nodeName == 'contactinfo':
         bugurl = self._reqatt(node, 'bugurl')
         # This element can be repeated, later entries will clobber earlier ones.
@@ -944,11 +947,29 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
           # If the manifest removes the hooks project, treat it as if it deleted
           # the repo-hooks element too.
-          if self._repo_hooks_project and (self._repo_hooks_project.name == name):
-            self._repo_hooks_project = None
+          if repo_hooks_project == name:
+            repo_hooks_project = None
         elif not XmlBool(node, 'optional', False):
           raise ManifestParseError('remove-project element specifies non-existent '
                                    'project: %s' % name)
+
+    # Store repo hooks project information.
+    if repo_hooks_project:
+      # Store a reference to the Project.
+      try:
+        repo_hooks_projects = self._projects[repo_hooks_project]
+      except KeyError:
+        raise ManifestParseError(
+            'project %s not found for repo-hooks' %
+            (repo_hooks_project))
+
+      if len(repo_hooks_projects) != 1:
+        raise ManifestParseError(
+            'internal error parsing repo-hooks in %s' %
+            (self.manifestFile))
+      self._repo_hooks_project = repo_hooks_projects[0]
+      # Store the enabled hooks in the Project object.
+      self._repo_hooks_project.enabled_repo_hooks = enabled_repo_hooks
 
   def _AddMetaProjectMirror(self, m):
     name = None
