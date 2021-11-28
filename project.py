@@ -2044,8 +2044,11 @@ class Project(object):
 
     if current_branch_only:
       if self.revisionExpr.startswith(R_TAGS):
-        # this is a tag and its sha1 value should never change
+        # This is a tag and its commit id should never change.
         tag_name = self.revisionExpr[len(R_TAGS):]
+      elif self.upstream and self.upstream.startswith(R_TAGS):
+        # This is a tag and its commit id should never change.
+        tag_name = self.upstream[len(R_TAGS):]
 
       if is_sha1 or tag_name is not None:
         if self._CheckForImmutableRevision():
@@ -2440,7 +2443,7 @@ class Project(object):
     if quiet:
       cmd.append('-q')
     if GitCommand(self, cmd).Wait() != 0:
-      raise GitError('%s submodule update --init --recursive %s ' % self.name)
+      raise GitError('%s submodule update --init --recursive ' % self.name)
 
   def _Rebase(self, upstream, onto=None):
     cmd = ['rebase']
@@ -2465,6 +2468,8 @@ class Project(object):
       if init_obj_dir:
         os.makedirs(self.objdir)
         self.bare_objdir.init()
+
+        self._UpdateHooks(quiet=quiet)
 
         if self.use_git_worktrees:
           # Enable per-worktree config file support if possible.  This is more a
@@ -2526,8 +2531,6 @@ class Project(object):
             _lwrite(os.path.join(self.gitdir, 'objects/info/alternates'),
                     os.path.join(ref_dir, 'objects') + '\n')
 
-        self._UpdateHooks(quiet=quiet)
-
         m = self.manifest.manifestProject.config
         for key in ['user.name', 'user.email']:
           if m.Has(key, include_defaults=False):
@@ -2543,11 +2546,11 @@ class Project(object):
       raise
 
   def _UpdateHooks(self, quiet=False):
-    if os.path.exists(self.gitdir):
+    if os.path.exists(self.objdir):
       self._InitHooks(quiet=quiet)
 
   def _InitHooks(self, quiet=False):
-    hooks = platform_utils.realpath(self._gitdir_path('hooks'))
+    hooks = platform_utils.realpath(os.path.join(self.objdir, 'hooks'))
     if not os.path.exists(hooks):
       os.makedirs(hooks)
     for stock_hook in _ProjectHooks():
@@ -2852,9 +2855,6 @@ class Project(object):
               'https://github.com/git-for-windows/git/wiki/Symbolic-Links '
               'for other options.')
     return 'filesystem must support symlinks'
-
-  def _gitdir_path(self, path):
-    return platform_utils.realpath(os.path.join(self.gitdir, path))
 
   def _revlist(self, *args, **kw):
     a = []
