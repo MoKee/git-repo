@@ -84,6 +84,11 @@ REPO_PROJECT is set to the unique name of the project.
 
 REPO_PATH is the path relative the the root of the client.
 
+REPO_OUTERPATH is the path of the sub manifest's root relative to the root of
+the client.
+
+REPO_INNERPATH is the path relative to the root of the sub manifest.
+
 REPO_REMOTE is the name of the remote system from the manifest.
 
 REPO_LREV is the name of the revision from the manifest, translated
@@ -168,6 +173,7 @@ without iterating through the remaining projects.
 
   def Execute(self, opt, args):
     cmd = [opt.command[0]]
+    all_trees = not opt.this_manifest_only
 
     shell = True
     if re.compile(r'^[a-z0-9A-Z_/\.-]+$').match(cmd[0]):
@@ -213,11 +219,11 @@ without iterating through the remaining projects.
       self.manifest.Override(smart_sync_manifest_path)
 
     if opt.regex:
-      projects = self.FindProjects(args)
+      projects = self.FindProjects(args, all_manifests=all_trees)
     elif opt.inverse_regex:
-      projects = self.FindProjects(args, inverse=True)
+      projects = self.FindProjects(args, inverse=True, all_manifests=all_trees)
     else:
-      projects = self.GetProjects(args, groups=opt.groups)
+      projects = self.GetProjects(args, groups=opt.groups, all_manifests=all_trees)
 
     os.environ['REPO_COUNT'] = str(len(projects))
 
@@ -289,7 +295,9 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
     env[name] = val
 
   setenv('REPO_PROJECT', project.name)
-  setenv('REPO_PATH', project.relpath)
+  setenv('REPO_OUTERPATH', project.manifest.path_prefix)
+  setenv('REPO_INNERPATH', project.relpath)
+  setenv('REPO_PATH', project.RelPath(local=opt.this_manifest_only))
   setenv('REPO_REMOTE', project.remote.name)
   try:
     # If we aren't in a fully synced state and we don't have the ref the manifest
@@ -320,7 +328,7 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
     output = ''
     if ((opt.project_header and opt.verbose)
             or not opt.project_header):
-      output = 'skipping %s/' % project.relpath
+      output = 'skipping %s/' % project.RelPath(local=opt.this_manifest_only)
     return (1, output)
 
   if opt.verbose:
@@ -344,7 +352,7 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
       if mirror:
         project_header_path = project.name
       else:
-        project_header_path = project.relpath
+        project_header_path = project.RelPath(local=opt.this_manifest_only)
       out.project('project %s/' % project_header_path)
       out.nl()
       buf.write(output)
