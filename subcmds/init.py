@@ -24,8 +24,6 @@ from error import ManifestParseError
 from project import SyncBuffer
 from git_config import GitConfig
 from git_command import git_require, MIN_GIT_VERSION_SOFT, MIN_GIT_VERSION_HARD
-import fetch
-import platform_utils
 from wrapper import Wrapper
 
 
@@ -91,11 +89,10 @@ to update the working directory files.
   def _Options(self, p, gitc_init=False):
     Wrapper().InitParser(p, gitc_init=gitc_init)
     m = p.add_option_group('Multi-manifest')
-    m.add_option('--outer-manifest', action='store_true',
+    m.add_option('--outer-manifest', action='store_true', default=True,
                  help='operate starting at the outermost manifest')
     m.add_option('--no-outer-manifest', dest='outer_manifest',
-                 action='store_false', default=None,
-                 help='do not operate on outer manifests')
+                 action='store_false', help='do not operate on outer manifests')
     m.add_option('--this-manifest-only', action='store_true', default=None,
                  help='only operate on this (sub)manifest')
     m.add_option('--no-this-manifest-only', '--all-manifests',

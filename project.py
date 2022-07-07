@@ -29,9 +29,11 @@ import time
 import urllib.parse
 
 from color import Coloring
+import fetch
 from git_command import GitCommand, git_require
 from git_config import GitConfig, IsId, GetSchemeFromUrl, GetUrlCookieFile, \
     ID_RE
+import git_superproject
 from git_trace2_event_log import EventLog
 from error import GitError, UploadError, DownloadError
 from error import ManifestInvalidRevisionError, ManifestInvalidPathError
@@ -48,6 +50,9 @@ MAXIMUM_RETRY_SLEEP_SEC = 3600.0
 # +-10% random jitter is added to each Fetches retry sleep duration.
 RETRY_JITTER_PERCENT = 0.1
 
+# Whether to use alternates.
+# TODO(vapier): Remove knob once behavior is verified.
+_ALTERNATES = os.environ.get('REPO_USE_ALTERNATES') == '1'
 
 def _lwrite(path, content):
   lock = '%s.lock' % path
@@ -459,7 +464,13 @@ class RemoteSpec(object):
 
 class Project(object):
   # These objects can be shared between several working trees.
-  shareable_dirs = ['hooks', 'objects', 'rr-cache']
+  @property
+  def shareable_dirs(self):
+    """Return the shareable directories"""
+    if self.UseAlternates:
+      return ['hooks', 'rr-cache']
+    else:
+      return ['hooks', 'objects', 'rr-cache']
 
   def __init__(self,
                manifest,
@@ -590,6 +601,14 @@ class Project(object):
     self.bare_objdir = self._GitGetByExec(self, bare=True, gitdir=self.objdir)
 
   @property
+  def UseAlternates(self):
+    """Whether git alternates are in use.
+
+    This will be removed once migration to alternates is complete.
+    """
+    return _ALTERNATES or self.manifest.is_multimanifest
+
+  @property
   def Derived(self):
     return self.is_derived
 
@@ -714,7 +733,8 @@ class Project(object):
        The special manifest group "default" will match any project that
        does not have the special project group "notdefault"
     """
-    expanded_manifest_groups = manifest_groups or ['default']
+    default_groups = self.manifest.default_groups or ['default']
+    expanded_manifest_groups = manifest_groups or default_groups
     expanded_project_groups = ['all'] + (self.groups or [])
     if 'notdefault' not in expanded_project_groups:
       expanded_project_groups += ['default']
@@ -994,6 +1014,13 @@ class Project(object):
     if not branch.remote.review:
       raise GitError('remote %s has no review url' % branch.remote.name)
 
+    # Basic validity check on label syntax.
+    for label in labels:
+      if not re.match(r'^.+[+-][0-9]+$', label):
+        raise UploadError(
+            f'invalid label syntax "{label}": labels use forms like '
+            'CodeReview+1 or Verified-1')
+
     if dest_branch is None:
       dest_branch = self.dest_branch
     if dest_branch is None:
@@ -1029,6 +1056,7 @@ class Project(object):
     if auto_topic:
       opts += ['topic=' + branch.name]
     opts += ['t=%s' % p for p in hashtags]
+    # NB: No need to encode labels as they've been validated above.
     opts += ['l=%s' % p for p in labels]
 
     opts += ['r=%s' % p for p in people[0]]
@@ -1132,6 +1160,17 @@ class Project(object):
     else:
       self._UpdateHooks(quiet=quiet)
     self._InitRemote()
+
+    if self.UseAlternates:
+      # If gitdir/objects is a symlink, migrate it from the old layout.
+      gitdir_objects = os.path.join(self.gitdir, 'objects')
+      if platform_utils.islink(gitdir_objects):
+        platform_utils.remove(gitdir_objects, missing_ok=True)
+      gitdir_alt = os.path.join(self.gitdir, 'objects/info/alternates')
+      if not os.path.exists(gitdir_alt):
+        os.makedirs(os.path.dirname(gitdir_alt), exist_ok=True)
+        _lwrite(gitdir_alt, os.path.join(
+            os.path.relpath(self.objdir, gitdir_objects), 'objects') + '\n')
 
     if is_new:
       alt = os.path.join(self.objdir, 'objects/info/alternates')
@@ -2156,6 +2195,8 @@ class Project(object):
     if prune:
       cmd.append('--prune')
 
+    # Always pass something for --recurse-submodules, git with GIT_DIR behaves
+    # incorrectly when not given `--recurse-submodules=no`. (b/218891912)
     cmd.append(f'--recurse-submodules={"on-demand" if submodules else "no"}')
 
     spec = []
@@ -3465,6 +3506,67 @@ class ManifestProject(MetaProject):
     """Return the name of the platform."""
     return platform.system().lower()
 
+  def SyncWithPossibleInit(self, submanifest, verbose=False,
+                           current_branch_only=False, tags='', git_event_log=None):
+    """Sync a manifestProject, possibly for the first time.
+
+    Call Sync() with arguments from the most recent `repo init`.  If this is a
+    new sub manifest, then inherit options from the parent's manifestProject.
+
+    This is used by subcmds.Sync() to do an initial download of new sub
+    manifests.
+
+    Args:
+      submanifest: an XmlSubmanifest, the submanifest to re-sync.
+      verbose: a boolean, whether to show all output, rather than only errors.
+      current_branch_only: a boolean, whether to only fetch the current manifest
+          branch from the server.
+      tags: a boolean, whether to fetch tags.
+      git_event_log: an EventLog, for git tracing.
+    """
+    # TODO(lamontjones): when refactoring sync (and init?) consider how to
+    # better get the init options that we should use for new submanifests that
+    # are added when syncing an existing workspace.
+    git_event_log = git_event_log or EventLog()
+    spec = submanifest.ToSubmanifestSpec()
+    # Use the init options from the existing manifestProject, or the parent if
+    # it doesn't exist.
+    #
+    # Today, we only support changing manifest_groups on the sub-manifest, with
+    # no supported-for-the-user way to change the other arguments from those
+    # specified by the outermost manifest.
+    #
+    # TODO(lamontjones): determine which of these should come from the outermost
+    # manifest and which should come from the parent manifest.
+    mp = self if self.Exists else submanifest.parent.manifestProject
+    return self.Sync(
+        manifest_url=spec.manifestUrl,
+        manifest_branch=spec.revision,
+        standalone_manifest=mp.standalone_manifest_url,
+        groups=mp.manifest_groups,
+        platform=mp.manifest_platform,
+        mirror=mp.mirror,
+        dissociate=mp.dissociate,
+        reference=mp.reference,
+        worktree=mp.use_worktree,
+        submodules=mp.submodules,
+        archive=mp.archive,
+        partial_clone=mp.partial_clone,
+        clone_filter=mp.clone_filter,
+        partial_clone_exclude=mp.partial_clone_exclude,
+        clone_bundle=mp.clone_bundle,
+        git_lfs=mp.git_lfs,
+        use_superproject=mp.use_superproject,
+        verbose=verbose,
+        current_branch_only=current_branch_only,
+        tags=tags,
+        depth=mp.depth,
+        git_event_log=git_event_log,
+        manifest_name=spec.manifestName,
+        this_manifest_only=True,
+        outer_manifest=False,
+    )
+
   def Sync(self, _kwargs_only=(), manifest_url='', manifest_branch=None,
            standalone_manifest=False, groups='', mirror=False, reference='',
            dissociate=False, worktree=False, submodules=False, archive=False,
@@ -3517,7 +3619,7 @@ class ManifestProject(MetaProject):
     """
     assert _kwargs_only == (), 'Sync only accepts keyword arguments.'
 
-    groups = groups or 'default'
+    groups = groups or self.manifest.GetDefaultGroupsStr(with_platform=False)
     platform = platform or 'auto'
     git_event_log = git_event_log or EventLog()
     if outer_manifest and self.manifest.is_submanifest:
@@ -3731,46 +3833,45 @@ class ManifestProject(MetaProject):
     if use_superproject is not None:
       self.config.SetBoolean('repo.superproject', use_superproject)
 
-    if standalone_manifest:
-      if is_new:
-        manifest_name = 'default.xml'
-        manifest_data = fetch.fetch_file(manifest_url, verbose=verbose)
-        dest = os.path.join(self.worktree, manifest_name)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, 'wb') as f:
-          f.write(manifest_data)
-      return
+    if not standalone_manifest:
+      if not self.Sync_NetworkHalf(
+          is_new=is_new, quiet=not verbose, verbose=verbose,
+          clone_bundle=clone_bundle, current_branch_only=current_branch_only,
+          tags=tags, submodules=submodules, clone_filter=clone_filter,
+          partial_clone_exclude=self.manifest.PartialCloneExclude):
+        r = self.GetRemote(self.remote.name)
+        print('fatal: cannot obtain manifest %s' % r.url, file=sys.stderr)
 
-    if not self.Sync_NetworkHalf(is_new=is_new, quiet=not verbose, verbose=verbose,
-                              clone_bundle=clone_bundle,
-                              current_branch_only=current_branch_only,
-                              tags=tags, submodules=submodules,
-                              clone_filter=clone_filter,
-                              partial_clone_exclude=self.manifest.PartialCloneExclude):
-      r = self.GetRemote(self.remote.name)
-      print('fatal: cannot obtain manifest %s' % r.url, file=sys.stderr)
-
-      # Better delete the manifest git dir if we created it; otherwise next
-      # time (when user fixes problems) we won't go through the "is_new" logic.
-      if is_new:
-        platform_utils.rmtree(self.gitdir)
-      return False
-
-    if manifest_branch:
-      self.MetaBranchSwitch(submodules=submodules)
-
-    syncbuf = SyncBuffer(self.config)
-    self.Sync_LocalHalf(syncbuf, submodules=submodules)
-    syncbuf.Finish()
-
-    if is_new or self.CurrentBranch is None:
-      if not self.StartBranch('default'):
-        print('fatal: cannot create default in manifest', file=sys.stderr)
+        # Better delete the manifest git dir if we created it; otherwise next
+        # time (when user fixes problems) we won't go through the "is_new" logic.
+        if is_new:
+          platform_utils.rmtree(self.gitdir)
         return False
 
-    if not manifest_name:
-      print('fatal: manifest name (-m) is required.', file=sys.stderr)
-      return False
+      if manifest_branch:
+        self.MetaBranchSwitch(submodules=submodules)
+
+      syncbuf = SyncBuffer(self.config)
+      self.Sync_LocalHalf(syncbuf, submodules=submodules)
+      syncbuf.Finish()
+
+      if is_new or self.CurrentBranch is None:
+        if not self.StartBranch('default'):
+          print('fatal: cannot create default in manifest', file=sys.stderr)
+          return False
+
+      if not manifest_name:
+        print('fatal: manifest name (-m) is required.', file=sys.stderr)
+        return False
+
+    elif is_new:
+      # This is a new standalone manifest.
+      manifest_name = 'default.xml'
+      manifest_data = fetch.fetch_file(manifest_url, verbose=verbose)
+      dest = os.path.join(self.worktree, manifest_name)
+      os.makedirs(os.path.dirname(dest), exist_ok=True)
+      with open(dest, 'wb') as f:
+        f.write(manifest_data)
 
     try:
       self.manifest.Link(manifest_name)
@@ -3811,10 +3912,10 @@ class ManifestProject(MetaProject):
             outer_manifest=False,
         )
 
-    # Lastly, clone the superproject(s).
-    if self.manifest.manifestProject.use_superproject:
-      sync_result = Superproject(
-          self.manifest, self.manifest.repodir, git_event_log, quiet=not verbose).Sync()
+    # Lastly, if the manifest has a <superproject> then have the superproject
+    # sync it (if it will be used).
+    if git_superproject.UseSuperproject(use_superproject, self.manifest):
+      sync_result = self.manifest.superproject.Sync(git_event_log)
       if not sync_result.success:
         print('warning: git update of superproject for '
               f'{self.manifest.path_prefix} failed, repo sync will not use '
